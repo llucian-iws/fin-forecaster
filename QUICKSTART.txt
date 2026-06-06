@@ -3,13 +3,16 @@
 ║              Adapted from SNOW.ipynb | Next Sunday 12 AM UTC               ║
 ╚════════════════════════════════════════════════════════════════════════════╝
 
-📊 WHAT THIS DOES
+📊 WHAT THIS DOES (Sophisticated Quantitative Stack)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ✓ Fetches 365+ days of hourly BTC-USD data from Yahoo Finance
 ✓ Extracts 10 technical indicators (RSI, MACD, EMAs, Bollinger, ATR, vol)
 ✓ Detects market regime (BEAR/CHOP/BULL) using Hidden Markov Model
-✓ Trains Gradient Boosting ensemble model for price prediction
+✓ Trains CNN-LSTM Deep Learning Neural Network (TensorFlow)
+  • 1D Convolutional layers for feature extraction
+  • LSTM layers for temporal sequence learning
+  • MC Dropout for uncertainty quantification
 ✓ Generates 90% confidence intervals via conformal prediction bands
 ✓ Runs 10,000 Monte Carlo paths across 3 scenarios (Bull/Base/Bear)
 ✓ Forecasts exact price for next Sunday 12:00 AM UTC

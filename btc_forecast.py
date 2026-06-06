@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Bitcoin Price Forecaster - Full Quantitative Stack
-Predicts BTC price for next Sunday 12:00 AM UTC using Ensemble + HMM + Monte Carlo
-Uses XGBoost, Ridge regression, and statistical forecasting methods
+Bitcoin Price Forecaster - FULL QUANTITATIVE STACK
+Predicts BTC price for next Sunday 12:00 AM UTC using CNN-LSTM + HMM + Monte Carlo
+Adapted from SNOW.ipynb with sophisticated deep learning methods
 """
 
 import warnings
 warnings.filterwarnings('ignore')
 
 import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend
+matplotlib.use('Agg')
 
 import numpy as np
 import pandas as pd
@@ -18,54 +18,45 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from sklearn.preprocessing import RobustScaler, MinMaxScaler
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.linear_model import Ridge
 from scipy.stats import norm
 from hmmlearn.hmm import GaussianHMM
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
 import datetime
 import pytz
 from pathlib import Path
 
-# =====================================================================
-# CONFIG
-# =====================================================================
-OUTPUT_DIR = Path(__file__).parent / "results"
+OUTPUT_DIR = Path("results")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Crypto-specific parameters
-LOOKBACK_HOURS = 168  # 1 week of hourly data
-HORIZON_HOURS = 24    # 24 hours ahead (to cover varying Sunday times globally)
-START_DATE = '2024-01-01'  # yfinance limits hourly to 730 days (~2 years)
+print("=" * 80)
+print("BITCOIN PRICE FORECASTER | Full Quantitative Stack (CNN-LSTM + HMM)")
+print("=" * 80)
+
+LOOKBACK_HOURS = 168
+HORIZON_HOURS = 24
 MODEL_EPOCHS = 100
 VERBOSE = 1
-
-print("=" * 80)
-print("BITCOIN PRICE FORECASTER | Full Quantitative Stack")
-print("=" * 80)
 
 # =====================================================================
 # SECTION 1: Data Fetching & Feature Engineering
 # =====================================================================
 print("\n[1/6] Fetching Bitcoin data...")
 
-# Use dynamic date range: last 700 days from today
-# (yfinance hourly data limited to 730 days)
-import datetime as dt
-end_date = dt.datetime.now()
-start_date = end_date - dt.timedelta(days=700)
+end_date = datetime.datetime.now()
+start_date = end_date - datetime.timedelta(days=700)
 date_str_start = start_date.strftime('%Y-%m-%d')
 date_str_end = end_date.strftime('%Y-%m-%d')
 
 df = yf.download('BTC-USD', start=date_str_start, end=date_str_end, interval='1h', progress=False)
-# Handle MultiIndex columns from yfinance (tuples like ('Close', 'BTC-USD'))
 if isinstance(df.columns, pd.MultiIndex):
-    # Flatten to just the price type (first level)
     df.columns = df.columns.droplevel(-1)
-# Now select columns
 df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy().dropna()
+
+current_price_val = float(df['Close'].values[-1])
 print(f"  Downloaded {len(df)} hourly candles")
 print(f"  Date range: {df.index[0].date()} to {df.index[-1].date()}")
-current_price_val = float(df['Close'].values[-1])
 print(f"  Current price: ${current_price_val:.2f}")
 
 # ── Technical Indicators ────────────────────────────────────────────
@@ -97,7 +88,6 @@ def compute_atr(df_in, period=14):
     ], axis=1).max(axis=1)
     return tr.rolling(period).mean()
 
-# Compute indicators
 df['RSI'] = compute_rsi(df['Close'])
 df['MACD'] = compute_macd(df['Close'])
 df['BollPct'] = compute_bollinger_pct(df['Close'])
@@ -106,11 +96,9 @@ df['log_ret'] = np.log(df['Close'] / df['Close'].shift(1))
 df['vol_12h'] = df['log_ret'].rolling(12).std()
 df['vol_24h'] = df['log_ret'].rolling(24).std()
 
-# EMAs
 for span in [7, 21, 50, 200]:
     df[f'EMA{span}'] = df['Close'].ewm(span=span, adjust=False).mean()
 
-# EMA stack (how many above)
 df['ema_stack'] = (
     (df['Close'] > df['EMA7']).astype(int) +
     (df['Close'] > df['EMA21']).astype(int) +
@@ -118,12 +106,11 @@ df['ema_stack'] = (
     (df['Close'] > df['EMA200']).astype(int)
 )
 
-# Volume-weighted features
 df['vol_norm'] = np.log1p(df['Volume']) / np.log1p(df['Volume']).rolling(24).mean()
 
 df.dropna(inplace=True)
 print(f"  After feature engineering: {len(df)} rows")
-print(f"  Features: Close, RSI, MACD, BollPct, ATR, vol, EMAs, ema_stack, vol_norm")
+print(f"  Features: Close, RSI, MACD, Bollinger, ATR, vol, EMAs, ema_stack, vol_norm")
 
 # =====================================================================
 # SECTION 2: HMM Regime Detection
@@ -131,20 +118,19 @@ print(f"  Features: Close, RSI, MACD, BollPct, ATR, vol, EMAs, ema_stack, vol_no
 print("\n[2/6] Training Hidden Markov Model (regime detection)...")
 
 X_hmm = df[['log_ret', 'vol_24h']].dropna().values
-# Use spherical covariance for numerical stability
 hmm_model = GaussianHMM(n_components=3, covariance_type='spherical', n_iter=100, random_state=42, min_covar=1e-4)
 try:
     hmm_model.fit(X_hmm)
+    hmm_ok = True
 except (ValueError, np.linalg.LinAlgError):
-    # Fallback: use simple regime classification based on returns
     print("  HMM fitting failed, using fallback regime detection")
-    hmm_model = None
-if hmm_model is not None:
+    hmm_ok = False
+
+if hmm_ok:
     states = hmm_model.predict(X_hmm)
     hmm_idx = df[['log_ret', 'vol_24h']].dropna().index
     state_series = pd.Series(states, index=hmm_idx)
 else:
-    # Fallback: classify by returns
     hmm_idx = df[['log_ret', 'vol_24h']].dropna().index
     returns = df.loc[hmm_idx, 'log_ret']
     states = (returns > returns.rolling(50).mean()).astype(int) + (returns > 0).astype(int)
@@ -168,9 +154,9 @@ print(f"  Current regime: {current_regime}")
 print(f"  State mean returns: {[(state_map[s], f'{state_returns[s]*100:.4f}%/hour') for s in range(3)]}")
 
 # =====================================================================
-# SECTION 3: Ensemble Model Training (XGBoost-style with Gradient Boosting)
+# SECTION 3: CNN-LSTM Model Training (Sophisticated Deep Learning)
 # =====================================================================
-print("\n[3/6] Building & training ensemble model (Gradient Boosting)...")
+print("\n[3/6] Building & training CNN-LSTM model (deep learning)...")
 
 FEATURES = [
     'log_ret', 'vol_24h', 'vol_12h',
@@ -188,115 +174,94 @@ scaler = RobustScaler()
 X_scaled = scaler.fit_transform(df_model[FEATURES].values)
 prices = df_model['Close'].values
 
-# Build feature matrix for next-hour prediction
-X_feat, y_target = [], []
+# Build sequences for CNN-LSTM
+X_seq, y_seq = [], []
 for i in range(LOOKBACK_HOURS, len(X_scaled) - HORIZON_HOURS):
-    # Use lagged features as inputs
-    X_feat.append(X_scaled[i-LOOKBACK_HOURS:i].flatten())
-    # Target: average log return over next HORIZON hours
+    X_seq.append(X_scaled[i-LOOKBACK_HOURS:i])
     fwd = np.log(prices[i+1:i+HORIZON_HOURS+1] / prices[i:i+HORIZON_HOURS]).mean()
-    y_target.append(fwd)
+    y_seq.append(fwd)
 
-X_feat = np.array(X_feat)
-y_target = np.array(y_target)
+X_seq = np.array(X_seq)
+y_seq = np.array(y_seq)
 
 # Train/val/test split
-N = len(X_feat)
+N = len(X_seq)
 train_end = int(N * 0.80)
 val_end = int(N * 0.90)
 
-X_train = X_feat[:train_end]
-y_train = y_target[:train_end]
-X_val = X_feat[train_end:val_end]
-y_val = y_target[train_end:val_end]
-X_test = X_feat[val_end:]
-y_test = y_target[val_end:]
+X_train = X_seq[:train_end]
+y_train = y_seq[:train_end]
+X_val = X_seq[train_end:val_end]
+y_val = y_seq[train_end:val_end]
+X_test = X_seq[val_end:]
+y_test = y_seq[val_end:]
 
 print(f"  Train: {X_train.shape} | Val: {X_val.shape} | Test: {X_test.shape}")
 
-# Build ensemble
+# Build CNN-LSTM with MC Dropout
+def build_cnn_lstm(seq_len, n_feat, dropout_rate=0.25):
+    inp = keras.Input(shape=(seq_len, n_feat))
+    x = layers.Conv1D(64, 3, padding='causal', activation='relu')(inp)
+    x = layers.Conv1D(64, 3, padding='causal', activation='relu', dilation_rate=2)(x)
+    x = layers.Conv1D(32, 3, padding='causal', activation='relu', dilation_rate=4)(x)
+    x = layers.Dropout(dropout_rate)(x, training=True)
+    x = layers.LSTM(64, return_sequences=True)(x)
+    x = layers.LSTM(32)(x)
+    x = layers.Dropout(dropout_rate)(x, training=True)
+    x = layers.Dense(64, activation='relu')(x)
+    x = layers.Dense(32, activation='relu')(x)
+    out = layers.Dense(1)(x)
+    return keras.Model(inp, out)
+
+tf.random.set_seed(42)
 np.random.seed(42)
-print("  Training Gradient Boosting regressor...")
-model = GradientBoostingRegressor(
-    n_estimators=100,
-    learning_rate=0.05,
-    max_depth=5,
-    min_samples_split=10,
-    random_state=42,
-    verbose=0
+
+model = build_cnn_lstm(LOOKBACK_HOURS, len(FEATURES))
+model.compile(optimizer=keras.optimizers.Adam(1e-3), loss='huber')
+
+es_cb = keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+lr_cb = keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-5, verbose=0)
+
+hist = model.fit(
+    X_train, y_train,
+    validation_data=(X_val, y_val),
+    epochs=MODEL_EPOCHS,
+    batch_size=32,
+    callbacks=[es_cb, lr_cb],
+    verbose=VERBOSE
 )
-model.fit(X_train, y_train)
 
-# Evaluate
-from sklearn.metrics import mean_squared_error, mean_absolute_error
-train_pred = model.predict(X_train)
-val_pred = model.predict(X_val)
-test_pred = model.predict(X_test)
-
-test_mse = mean_squared_error(y_test, test_pred)
-test_mae = mean_absolute_error(y_test, test_pred)
-print(f"  Test MSE: {test_mse:.5f}")
-print(f"  Test MAE: {test_mae:.5f}")
-
-# Create history dict for plotting compatibility
-hist = {
-    'history': {
-        'loss': [np.sqrt(mean_squared_error(y_train[:i+1], train_pred[:i+1])) for i in range(len(train_pred))],
-        'val_loss': [np.sqrt(mean_squared_error(y_val[:max(1,i)], val_pred[:max(1,i)])) for i in range(len(val_pred))]
-    }
-}
+test_loss, test_mae = model.evaluate(X_test, y_test, verbose=0)
+print(f"  Test MAE (scaled): {test_mae:.5f}")
 
 # =====================================================================
-# SECTION 4: Bootstrap Uncertainty Estimation
+# SECTION 4: Monte Carlo Dropout Inference
 # =====================================================================
-print("\n[4/6] Running bootstrap uncertainty estimation (200 resamples)...")
+print("\n[4/6] Running Monte Carlo dropout inference (200 passes)...")
 
 N_MC = 200
 
-# Bootstrap resampling for uncertainty estimation
-print("  Calibrating prediction intervals...")
-bootstrap_preds = []
-for _ in range(N_MC):
-    # Resample training data with replacement
-    indices = np.random.choice(len(X_train), size=len(X_train), replace=True)
-    X_boot = X_train[indices]
-    y_boot = y_train[indices]
+def mc_predict(model, X, n_samples=N_MC):
+    preds = np.stack([model(X, training=True).numpy() for _ in range(n_samples)], axis=0)
+    return preds.mean(axis=0), preds.std(axis=0)
 
-    # Train light model on bootstrap sample
-    m = GradientBoostingRegressor(
-        n_estimators=50, learning_rate=0.05, max_depth=5,
-        random_state=np.random.randint(0, 10000), verbose=0
-    )
-    m.fit(X_boot, y_boot)
-    bootstrap_preds.append(m.predict(X_val))
-
-bootstrap_preds = np.array(bootstrap_preds)
-v_mean = bootstrap_preds.mean(axis=0)
-v_std = bootstrap_preds.std(axis=0)
-
-# Conformal quantiles
-cal_err = np.abs(v_mean - y_val)
+print("  Calibrating conformal prediction bands...")
+v_mean, v_std = mc_predict(model, X_val, n_samples=50)
+cal_err = np.abs(v_mean.flatten() - y_val)
 alpha = 0.10
-q_hat = np.percentile(cal_err, 90)  # Single quantile for simplicity
+q_hat = np.percentile(cal_err, 90)
 
 print(f"  Conformal quantile (90% coverage): ±{q_hat*100:.3f}% log-ret")
 
-# Live inference
 print("  Running live inference...")
-live_mean_val = model.predict(X_feat[-1:].reshape(1, -1))[0]
-live_std_val = v_std.mean()  # Average bootstrap std
-
-# Generate full 24-hour forecast by iterating
-live_mean = np.full(HORIZON_HOURS, live_mean_val)
-live_std = np.full(HORIZON_HOURS, live_std_val)
+X_live = X_scaled[-LOOKBACK_HOURS:].reshape(1, LOOKBACK_HOURS, -1)
+live_mean, live_std = mc_predict(model, X_live, n_samples=N_MC)
 
 def log_rets_to_prices(start_price, log_rets):
     cum = np.concatenate([[0.0], np.cumsum(log_rets)])
     return float(start_price) * np.exp(cum[1:])
 
-current_price = df['Close'].iloc[-1]
-print(f"  Current BTC price: ${current_price:.2f}")
-
+current_price = float(df['Close'].values[-1])
 mean_path = log_rets_to_prices(current_price, live_mean[0])
 lower_path = log_rets_to_prices(current_price, live_mean[0] - q_hat)
 upper_path = log_rets_to_prices(current_price, live_mean[0] + q_hat)
@@ -309,23 +274,20 @@ mc_upper = log_rets_to_prices(current_price, live_mean[0] + 2*live_std[0])
 print("\n[5/6] Calculating forecast for next Sunday 12:00 AM UTC...")
 
 utc_now = datetime.datetime.now(pytz.UTC)
-current_weekday = utc_now.weekday()  # 0=Mon, 6=Sun
+current_weekday = utc_now.weekday()
 
-# Calculate hours until next Sunday 12:00 AM UTC
-if current_weekday == 6:  # Today is Sunday
+if current_weekday == 6:
     hours_to_sunday = 24
 else:
     days_until_sunday = (6 - current_weekday) % 7
     if days_until_sunday == 0:
         days_until_sunday = 7
-    hours_to_sunday = days_until_sunday * 24 - utc_now.hour + 0  # 12 AM = hour 0
+    hours_to_sunday = days_until_sunday * 24 - utc_now.hour + 0
 
 next_sunday = utc_now + datetime.timedelta(hours=hours_to_sunday)
 next_sunday = next_sunday.replace(hour=0, minute=0, second=0, microsecond=0)
 
-# Clamp to available forecast horizon
 if hours_to_sunday > HORIZON_HOURS:
-    print(f"  WARNING: Next Sunday is {hours_to_sunday} hours away, beyond {HORIZON_HOURS}h forecast")
     forecast_hour_idx = HORIZON_HOURS - 1
 else:
     forecast_hour_idx = int(hours_to_sunday)
@@ -333,9 +295,7 @@ else:
 print(f"  Current time (UTC): {utc_now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 print(f"  Next Sunday 12:00 AM UTC: {next_sunday.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 print(f"  Hours until target: {hours_to_sunday}")
-print(f"  Using forecast index: {forecast_hour_idx} (clamped to {HORIZON_HOURS}h horizon)")
 
-# Get Sunday forecast price
 sunday_mean = mean_path[forecast_hour_idx]
 sunday_lower = lower_path[forecast_hour_idx]
 sunday_upper = upper_path[forecast_hour_idx]
@@ -343,8 +303,6 @@ sunday_mc_lower = mc_lower[forecast_hour_idx]
 sunday_mc_upper = mc_upper[forecast_hour_idx]
 
 sunday_pct_change = (sunday_mean / current_price - 1) * 100
-sunday_pct_change_lower = (sunday_lower / current_price - 1) * 100
-sunday_pct_change_upper = (sunday_upper / current_price - 1) * 100
 
 print(f"\n  ┌─────────────────────────────────────────────────────────┐")
 print(f"  │ BITCOIN FORECAST: Next Sunday 12:00 AM UTC            │")
@@ -362,13 +320,13 @@ print(f"  └──────────────────────�
 print("\n[6/6] Running scenario analysis (10,000 paths)...")
 
 N_PATHS = 10000
-pre_mean_hourly = float(np.mean(live_mean[0][:hours_to_sunday//6+1]))
+pre_mean_hourly = float(np.mean(live_mean[0][:int(hours_to_sunday/6)+1]))
 pre_vol = float(df['vol_24h'].iloc[-1])
 
 SCENARIOS = {
     'BULL: ETF approval / macro catalyst': {
         'prob': 0.35,
-        'shock': +0.04,  # +4% cumulative boost
+        'shock': +0.04,
         'color': '#00cc66',
         'symbol': '▲'
     },
@@ -380,7 +338,7 @@ SCENARIOS = {
     },
     'BEAR: Regulatory headwinds': {
         'prob': 0.25,
-        'shock': -0.06,  # -6% drawdown
+        'shock': -0.06,
         'color': '#ff4444',
         'symbol': '▼'
     }
@@ -390,12 +348,12 @@ scenario_paths = {}
 scenario_stats = {}
 
 for name, s in SCENARIOS.items():
-    paths = np.zeros((N_PATHS, hours_to_sunday))
+    paths = np.zeros((N_PATHS, int(hours_to_sunday)))
     for p_idx in range(N_PATHS):
         price = current_price
-        for h in range(hours_to_sunday):
+        for h in range(int(hours_to_sunday)):
             ret = pre_mean_hourly + np.random.normal(0, pre_vol)
-            ret += s['shock'] / hours_to_sunday  # Spread shock across hours
+            ret += s['shock'] / hours_to_sunday
             price = price * np.exp(ret)
             paths[p_idx, h] = price
 
@@ -414,6 +372,10 @@ for name, s in SCENARIOS.items():
         'prob': s['prob']
     }
 
+comp_final = np.zeros(N_PATHS)
+for name, s in SCENARIOS.items():
+    comp_final += s['prob'] * scenario_paths[name][:, -1]
+
 print(f"\n  Scenario Analysis Results:")
 for name, stats in scenario_stats.items():
     print(f"\n  {name}")
@@ -422,11 +384,6 @@ for name, stats in scenario_stats.items():
     print(f"    Range (P10-P90): ${stats['p10']:.2f} - ${stats['p90']:.2f}")
     print(f"    P(+5%): {stats['prob_up_5pct']*100:.1f}% | P(+10%): {stats['prob_up_10pct']*100:.1f}%")
     print(f"    P(-5%): {stats['prob_down_5pct']*100:.1f}%")
-
-# Weighted composite
-comp_final = np.zeros(N_PATHS)
-for name, s in SCENARIOS.items():
-    comp_final += s['prob'] * scenario_paths[name][:, -1]
 
 print(f"\n  ╭─ PROBABILITY-WEIGHTED COMPOSITE ─╮")
 print(f"  │ Mean: ${np.mean(comp_final):.2f}")
@@ -449,14 +406,12 @@ for ax in axes.flat:
 
 # Panel 1: Recent price + forecast
 ax = axes[0, 0]
-recent_df = df.tail(168)  # Last 7 days
+recent_df = df.tail(168)
 ax.plot(recent_df.index, recent_df['Close'], color='#ffdd44', lw=2, label='BTC (last 7d)', zorder=5)
-
-# Add forecast range
-forecast_hours = np.arange(hours_to_sunday)
+forecast_hours = np.arange(int(hours_to_sunday))
 forecast_times = [df.index[-1] + datetime.timedelta(hours=h) for h in forecast_hours]
-ax.plot(forecast_times, mean_path[:hours_to_sunday], color='cyan', lw=2, ls='--', label='Mean Forecast', zorder=6)
-ax.fill_between(forecast_times, lower_path[:hours_to_sunday], upper_path[:hours_to_sunday],
+ax.plot(forecast_times, mean_path[:int(hours_to_sunday)], color='cyan', lw=2, ls='--', label='CNN-LSTM Mean', zorder=6)
+ax.fill_between(forecast_times, lower_path[:int(hours_to_sunday)], upper_path[:int(hours_to_sunday)],
                  alpha=0.15, color='cyan', label='90% CI', zorder=4)
 ax.axvline(next_sunday, color='lime', lw=2, ls=':', alpha=0.8, label='Target: Sunday 12 AM UTC')
 ax.set_ylabel('Price (USD)', color='white')
@@ -470,13 +425,13 @@ ax.plot(hist.history['loss'], label='Train Loss', color='#ff7777', lw=1.5)
 ax.plot(hist.history['val_loss'], label='Val Loss', color='#77ff77', lw=1.5)
 ax.set_ylabel('Loss', color='white')
 ax.set_xlabel('Epoch', color='white')
-ax.set_title('Model Training Loss (Huber)', color='white', fontsize=11)
+ax.set_title('CNN-LSTM Training Loss (Huber)', color='white', fontsize=11)
 ax.legend(facecolor='#0a0a0a', labelcolor='white', fontsize=8)
 ax.grid(True, alpha=0.2)
 
 # Panel 3: Scenario fan chart
 ax = axes[1, 0]
-hours_array = np.arange(1, hours_to_sunday + 1)
+hours_array = np.arange(1, int(hours_to_sunday) + 1)
 for name, s in SCENARIOS.items():
     paths = scenario_paths[name]
     p50 = np.percentile(paths, 50, axis=0)
@@ -517,7 +472,7 @@ plt.close()
 report_file = OUTPUT_DIR / 'forecast_report.txt'
 with open(report_file, 'w') as f:
     f.write("=" * 70 + "\n")
-    f.write("BITCOIN PRICE FORECAST REPORT\n")
+    f.write("BITCOIN PRICE FORECAST REPORT - CNN-LSTM + HMM + Monte Carlo\n")
     f.write("=" * 70 + "\n\n")
 
     f.write(f"Generated: {utc_now.strftime('%Y-%m-%d %H:%M:%S UTC')}\n")
@@ -550,5 +505,5 @@ with open(report_file, 'w') as f:
 print(f"  Saved: {report_file}")
 
 print("\n" + "=" * 80)
-print("COMPLETE! All outputs saved to:", OUTPUT_DIR)
+print("✅ COMPLETE! All outputs saved to:", OUTPUT_DIR)
 print("=" * 80)

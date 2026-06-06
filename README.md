@@ -7,24 +7,29 @@ A comprehensive quantitative analysis stack for predicting Bitcoin price on Sund
 - **Data Source**: Real-time BTC-USD data from Yahoo Finance (hourly candles)
 - **Technical Indicators**: RSI, MACD, Bollinger Bands, ATR, EMAs, Volume normalization
 - **Regime Detection**: Hidden Markov Model (3-state: BEAR/CHOP/BULL)
-- **Forecasting**: Gradient Boosting Regressor with bootstrap uncertainty
-- **Uncertainty Quantification**: Conformal prediction bands + Monte Carlo bootstrap
+- **Forecasting**: CNN-LSTM Deep Learning Neural Network (sophisticated ensemble architecture)
+  - 1D Convolutional layers for feature extraction
+  - LSTM layers for temporal sequence learning
+  - MC Dropout for uncertainty quantification
+- **Uncertainty Quantification**: Conformal prediction bands + Monte Carlo Dropout
 - **Scenario Analysis**: Bull/Base/Bear event scenarios with 10,000 simulated paths
 - **Output**: Predictions, confidence intervals, scenario probabilities, visualizations
 
 ## Quick Start
 
-### Using Docker (Recommended)
+### Using Docker (Recommended - Full Sophisticated Stack)
 
 ```bash
-# Build and run in Docker
+# Build and run in Docker (Python 3.11 + TensorFlow)
 make docker-run
 
 # Or use docker-compose directly
 docker-compose up --build
 ```
 
-### Local Installation
+**Why Docker?** The full CNN-LSTM model requires TensorFlow 2.13+, which requires Python 3.11. Docker isolates the Python environment so you can run the sophisticated deep learning methods regardless of your local Python version.
+
+### Local Installation (Lite Version)
 
 ```bash
 # Install dependencies
@@ -32,11 +37,11 @@ make install
 # or
 pip install -r requirements.txt
 
-# Run forecast
-make run
-# or
-python3 btc_forecast.py
+# Run lite forecast (Gradient Boosting - works on Python 3.14+)
+python3 btc_forecast_lite.py
 ```
+
+**Note:** Local execution uses the `btc_forecast_lite.py` (Gradient Boosting) because Python 3.14+ is not yet supported by TensorFlow. Use Docker for the full CNN-LSTM implementation.
 
 ## Output Files
 

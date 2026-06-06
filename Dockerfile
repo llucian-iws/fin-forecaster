@@ -13,8 +13,9 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the prediction script
+# Copy prediction scripts
 COPY btc_forecast.py .
+COPY btc_forecast_lite.py .
 
-# Default command
+# Default command (full sophisticated version)
 CMD ["python", "btc_forecast.py"]
