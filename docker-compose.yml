@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  btc-forecaster:
+    build: .
+    container_name: btc_forecaster
+    volumes:
+      - ./results:/app/results
+    environment:
+      - TF_CPP_MIN_LOG_LEVEL=2
+    stdin_open: true
+    tty: true

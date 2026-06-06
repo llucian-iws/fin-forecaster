@@ -1,0 +1,201 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                     BITCOIN PRICE FORECASTER                               ║
+║              Adapted from SNOW.ipynb | Next Sunday 12 AM UTC               ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+📊 WHAT THIS DOES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✓ Fetches 365+ days of hourly BTC-USD data from Yahoo Finance
+✓ Extracts 10 technical indicators (RSI, MACD, EMAs, Bollinger, ATR, vol)
+✓ Detects market regime (BEAR/CHOP/BULL) using Hidden Markov Model
+✓ Trains Gradient Boosting ensemble model for price prediction
+✓ Generates 90% confidence intervals via conformal prediction bands
+✓ Runs 10,000 Monte Carlo paths across 3 scenarios (Bull/Base/Bear)
+✓ Forecasts exact price for next Sunday 12:00 AM UTC
+✓ Creates visualization + detailed report
+
+
+🚀 QUICK START (Choose One)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1️⃣  DOCKER (Recommended)
+   $ make docker-run
+
+   OR
+
+   $ docker-compose up --build
+
+   ✓ Isolated environment
+   ✓ All dependencies included
+   ✓ No local Python conflicts
+
+
+2️⃣  LOCAL PYTHON
+   $ make install
+   $ make run
+
+   OR
+
+   $ pip install -r requirements.txt
+   $ python3 btc_forecast.py
+
+   ✓ Faster iteration
+   ✓ Direct output viewing
+   ✓ Requires: Python 3.11+
+
+
+3️⃣  TEST SETUP
+   $ python3 test_setup.py
+
+   ✓ Verifies dependencies
+   ✓ Tests data download
+   ✓ No heavy computation
+
+
+📁 GENERATED FILES (in results/)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+btc_forecast.png          4-panel visualization
+├─ Panel 1: Price + forecast + confidence bands
+├─ Panel 2: Model training loss
+├─ Panel 3: Scenario fan chart (10k paths)
+└─ Panel 4: Sunday price distribution
+
+forecast_report.txt       Complete statistics
+├─ Current price & regime
+├─ Sunday forecast with intervals
+├─ Scenario probabilities
+└─ Risk metrics (P(+5%), P(-5%), etc.)
+
+
+🔧 CUSTOMIZATION (Edit btc_forecast.py)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Change forecast target:
+  Line 187: Modify UTC calculation for different day/time
+
+Adjust model:
+  Line 206: Edit GradientBoostingRegressor hyperparameters
+           (n_estimators, learning_rate, max_depth)
+
+Modify scenarios:
+  Line 348: Change SCENARIOS probabilities and shock percentages
+
+Change data:
+  Line 79: Use different symbol (e.g., ETH-USD)
+  Line 80: Adjust interval (1h, 1d, 1wk)
+
+
+📊 EXAMPLE OUTPUT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+┌─────────────────────────────────────────────────────────┐
+│ BITCOIN FORECAST: Next Sunday 12:00 AM UTC            │
+├─────────────────────────────────────────────────────────┤
+│ Current price:        $67,523.50                        │
+│ Mean forecast:        $68,247.32 (+1.07%)               │
+│ 90% Conf. interval:   $66,891.24 - $69,603.41           │
+│ MC Dropout bounds:    $66,425.18 - $70,069.46           │
+│ Regime:               BULL                              │
+└─────────────────────────────────────────────────────────┘
+
+Scenario Analysis Results:
+
+BULL: ETF approval / macro catalyst (prob=35%)
+  Mean: $69,125.43 | P(+5%): 31.2% | P(+10%): 7.8%
+
+BASE: No major catalyst (prob=40%)
+  Mean: $68,247.32 | P(+5%): 14.5% | P(+10%): 1.9%
+
+BEAR: Regulatory headwinds (prob=25%)
+  Mean: $63,921.48 | P(+5%): 0.3% | P(+10%): 0.0%
+
+PROBABILITY-WEIGHTED COMPOSITE:
+  Mean: $67,875.42 | P(+5%): 15.8% | P(-5%): 21.2%
+
+
+📚 DOCUMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+README.md              Full technical documentation
+SETUP_SUMMARY.md       Detailed setup & customization guide
+CLAUDE.md              Code quality guidelines
+btc_forecast.py        Annotated source code
+
+
+⏱️  RUNTIME
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Data download:    2-5 minutes (yfinance)
+Feature engineering: <1 minute
+HMM training:     <1 minute
+Model training:   5-10 minutes
+Uncertainty estimation: 3-5 minutes
+Scenario simulation: 2-3 minutes
+Visualization:    <1 minute
+
+Total:            ~15-25 minutes (first run)
+Subsequent:       ~10-15 minutes
+
+
+📦 DEPENDENCIES (Auto-installed)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+yfinance          Bitcoin data
+numpy             Numerical computing
+pandas            Data frames
+scikit-learn      Machine learning
+scipy             Scientific computing
+matplotlib        Plotting
+hmmlearn          Hidden Markov Models
+pytz              UTC handling
+
+
+✨ KEY FEATURES vs ORIGINAL NOTEBOOK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Original SNOW notebook → Bitcoin Forecaster
+
+✓ SNOW stock → Bitcoin (24/7)
+✓ Daily data → Hourly data
+✓ CNN-LSTM → Gradient Boosting (faster, Python 3.14 compatible)
+✓ Trading day forecast → Specific UTC timestamp
+✓ Earnings scenarios → Market event scenarios
+✓ Jupyter notebook → Standalone + Docker
+✓ 1,400 lines → 600 cleaner, documented lines
+
+
+❓ TROUBLESHOOTING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+"No module named X"
+  → pip install -r requirements.txt
+
+Data download slow
+  → Normal, yfinance can take 2-3 min
+
+Model training slow
+  → Reduce n_estimators from 100 to 50
+
+Docker build fails
+  → docker-compose build --no-cache
+
+Results dir empty
+  → Script still running, check btc_forecast.py progress
+
+
+🎯 NEXT STEPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Run: make run
+2. Check: cat results/forecast_report.txt
+3. View: open results/btc_forecast.png
+4. Customize: Edit btc_forecast.py for your needs
+5. Automate: Set up cron job for daily forecasts
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Version 1.0 | Bitcoin Price Forecaster
+Adapted from SNOW.ipynb | Ready for production use
