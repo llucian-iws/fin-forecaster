@@ -242,10 +242,13 @@ print("\n[4/6] Running Monte Carlo dropout inference (200 passes)...")
 N_MC = 200
 
 def mc_predict(model, X, n_samples=N_MC):
-    preds = np.stack([model(X, training=True).numpy().flatten() for _ in range(n_samples)], axis=0)
+    preds = np.array([model(X, training=True).numpy() for _ in range(n_samples)])
+    preds = preds.squeeze()
+    if preds.ndim == 1:
+        preds = preds.reshape(-1, 1)
     mean = preds.mean(axis=0)
     std = preds.std(axis=0)
-    return mean.reshape(1, -1) if mean.ndim == 1 else mean, std.reshape(1, -1) if std.ndim == 1 else std
+    return mean.reshape(1, -1), std.reshape(1, -1)
 
 print("  Calibrating conformal prediction bands...")
 v_mean, v_std = mc_predict(model, X_val, n_samples=50)
@@ -273,46 +276,47 @@ mc_upper = log_rets_to_prices(current_price, live_mean[0] + 2*live_std[0])
 # =====================================================================
 # SECTION 5: Find Next Sunday 12:00 AM UTC
 # =====================================================================
-print("\n[5/6] Calculating forecast for next Sunday 12:00 AM UTC...")
+print("\n[5/6] Calculating forecast for next Wednesday 12:00 AM UTC...")
 
 utc_now = datetime.datetime.now(pytz.UTC)
 current_weekday = utc_now.weekday()
 
-if current_weekday == 6:
-    hours_to_sunday = 24
+# Wednesday is weekday 2 (Monday=0, Tuesday=1, Wednesday=2)
+if current_weekday == 2:
+    hours_to_target = 24
 else:
-    days_until_sunday = (6 - current_weekday) % 7
-    if days_until_sunday == 0:
-        days_until_sunday = 7
-    hours_to_sunday = days_until_sunday * 24 - utc_now.hour + 0
+    days_until_target = (2 - current_weekday) % 7
+    if days_until_target == 0:
+        days_until_target = 7
+    hours_to_target = days_until_target * 24 - utc_now.hour + 0
 
-next_sunday = utc_now + datetime.timedelta(hours=hours_to_sunday)
-next_sunday = next_sunday.replace(hour=0, minute=0, second=0, microsecond=0)
+next_target = utc_now + datetime.timedelta(hours=hours_to_target)
+next_target = next_target.replace(hour=0, minute=0, second=0, microsecond=0)
 
-if hours_to_sunday > HORIZON_HOURS:
+if hours_to_target > HORIZON_HOURS:
     forecast_hour_idx = HORIZON_HOURS - 1
 else:
-    forecast_hour_idx = int(hours_to_sunday)
+    forecast_hour_idx = int(hours_to_target)
 
 print(f"  Current time (UTC): {utc_now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-print(f"  Next Sunday 12:00 AM UTC: {next_sunday.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-print(f"  Hours until target: {hours_to_sunday}")
+print(f"  Next Wednesday 12:00 AM UTC: {next_target.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+print(f"  Hours until target: {hours_to_target}")
 
-sunday_mean = mean_path[forecast_hour_idx]
-sunday_lower = lower_path[forecast_hour_idx]
-sunday_upper = upper_path[forecast_hour_idx]
-sunday_mc_lower = mc_lower[forecast_hour_idx]
-sunday_mc_upper = mc_upper[forecast_hour_idx]
+target_mean = mean_path[forecast_hour_idx]
+target_lower = lower_path[forecast_hour_idx]
+target_upper = upper_path[forecast_hour_idx]
+target_mc_lower = mc_lower[forecast_hour_idx]
+target_mc_upper = mc_upper[forecast_hour_idx]
 
-sunday_pct_change = (sunday_mean / current_price - 1) * 100
+target_pct_change = (target_mean / current_price - 1) * 100
 
 print(f"\n  ┌─────────────────────────────────────────────────────────┐")
-print(f"  │ BITCOIN FORECAST: Next Sunday 12:00 AM UTC            │")
+print(f"  │ BITCOIN FORECAST: Next Wednesday 12:00 AM UTC         │")
 print(f"  ├─────────────────────────────────────────────────────────┤")
 print(f"  │ Current price:        ${current_price:.2f}                    │")
-print(f"  │ Mean forecast:        ${sunday_mean:.2f} ({sunday_pct_change:+.2f}%)        │")
-print(f"  │ 90% Conf. interval:   ${sunday_lower:.2f} - ${sunday_upper:.2f}           │")
-print(f"  │ MC Dropout bounds:    ${sunday_mc_lower:.2f} - ${sunday_mc_upper:.2f}            │")
+print(f"  │ Mean forecast:        ${target_mean:.2f} ({target_pct_change:+.2f}%)        │")
+print(f"  │ 90% Conf. interval:   ${target_lower:.2f} - ${target_upper:.2f}           │")
+print(f"  │ MC Dropout bounds:    ${target_mc_lower:.2f} - ${target_mc_upper:.2f}            │")
 print(f"  │ Regime:               {current_regime}                         │")
 print(f"  └─────────────────────────────────────────────────────────┘")
 
@@ -456,10 +460,10 @@ for name, s in SCENARIOS.items():
     ax.hist(final_prices, bins=60, alpha=0.35, color=s['color'], label=name, density=True)
 
 ax.axvline(current_price, color='white', lw=1.5, ls='--', label='Current')
-ax.axvline(sunday_mean, color='cyan', lw=2, ls='--', label='CNN-LSTM Mean')
+ax.axvline(target_mean, color='cyan', lw=2, ls='--', label='CNN-LSTM Mean')
 ax.set_xlabel('BTC Price (USD)', color='white')
 ax.set_ylabel('Density', color='white')
-ax.set_title('Sunday 12 AM UTC: Price Distribution', color='white', fontsize=11)
+ax.set_title('Wednesday 12 AM UTC: Price Distribution', color='white', fontsize=11)
 ax.legend(facecolor='#0a0a0a', labelcolor='white', fontsize=8)
 ax.grid(True, alpha=0.2, axis='y')
 
@@ -481,13 +485,13 @@ with open(report_file, 'w') as f:
     f.write(f"Current Price: ${current_price:.2f}\n")
     f.write(f"Current Regime: {current_regime}\n\n")
 
-    f.write(f"TARGET: Sunday 12:00 AM UTC ({next_sunday.strftime('%Y-%m-%d %H:%M:%S')})\n")
-    f.write(f"Hours until target: {hours_to_sunday}\n\n")
+    f.write(f"TARGET: Wednesday 12:00 AM UTC ({next_target.strftime('%Y-%m-%d %H:%M:%S')})\n")
+    f.write(f"Hours until target: {hours_to_target}\n\n")
 
     f.write("FORECAST (CNN-LSTM + MC Dropout):\n")
-    f.write(f"  Mean price:         ${sunday_mean:.2f} ({sunday_pct_change:+.2f}%)\n")
-    f.write(f"  90% CI:             ${sunday_lower:.2f} - ${sunday_upper:.2f}\n")
-    f.write(f"  MC range (2σ):      ${sunday_mc_lower:.2f} - ${sunday_mc_upper:.2f}\n\n")
+    f.write(f"  Mean price:         ${target_mean:.2f} ({target_pct_change:+.2f}%)\n")
+    f.write(f"  90% CI:             ${target_lower:.2f} - ${target_upper:.2f}\n")
+    f.write(f"  MC range (2σ):      ${target_mc_lower:.2f} - ${target_mc_upper:.2f}\n\n")
 
     f.write("SCENARIO ANALYSIS (10,000 paths each):\n")
     for name, stats in scenario_stats.items():
