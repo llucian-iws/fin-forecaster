@@ -19,13 +19,64 @@ from sklearn.ensemble import GradientBoostingRegressor
 from pathlib import Path
 import datetime
 import pytz
+import sys
+import os
+import argparse
 
 OUTPUT_DIR = Path("/app/results")
 OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
 
+# Parse command-line arguments or environment variables for target date/time
+parser = argparse.ArgumentParser(description='Bitcoin Price Forecaster - Lite')
+parser.add_argument('--target-date', type=str, default=os.getenv('TARGET_DATE'),
+                    help='Target date in format YYYY-MM-DD or "next-<day>" (e.g., next-wednesday)')
+parser.add_argument('--target-hour', type=int, default=int(os.getenv('TARGET_HOUR', 0)),
+                    help='Target hour in UTC (0-23, default 0 for midnight)')
+args = parser.parse_args()
+
 print("=" * 80)
 print("BITCOIN PRICE FORECASTER - LITE VERSION")
 print("=" * 80)
+
+def calculate_target_datetime(target_date_arg, target_hour):
+    utc_now = datetime.datetime.now(pytz.UTC)
+    weekdays = {
+        'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3,
+        'friday': 4, 'saturday': 5, 'sunday': 6
+    }
+
+    if target_date_arg:
+        if target_date_arg.lower().startswith('next-'):
+            day_name = target_date_arg.lower().replace('next-', '')
+            if day_name not in weekdays:
+                print(f"Unknown day: {day_name}. Using next-wednesday.")
+                day_name = 'wednesday'
+            target_weekday = weekdays[day_name]
+            current_weekday = utc_now.weekday()
+            days_until = (target_weekday - current_weekday) % 7
+            if days_until == 0:
+                days_until = 7
+            target = utc_now + datetime.timedelta(days=days_until)
+        else:
+            try:
+                target = datetime.datetime.strptime(target_date_arg, '%Y-%m-%d')
+                target = pytz.UTC.localize(target)
+            except ValueError:
+                print(f"Invalid date format: {target_date_arg}. Using next-wednesday.")
+                return calculate_target_datetime('next-wednesday', target_hour)
+    else:
+        target_weekday = 2
+        current_weekday = utc_now.weekday()
+        days_until = (target_weekday - current_weekday) % 7
+        if days_until == 0:
+            days_until = 7
+        target = utc_now + datetime.timedelta(days=days_until)
+
+    target = target.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+    hours_to_target = (target - utc_now).total_seconds() / 3600.0
+    return target, hours_to_target
+
+target_dt, hours_to_target = calculate_target_datetime(args.target_date, args.target_hour)
 
 # =====================================================================
 # 1. Fetch Data
@@ -87,14 +138,8 @@ print(f"  Model R² score: {test_score:.4f}")
 # =====================================================================
 # 4. Make Prediction
 # =====================================================================
-print("\n[4/5] Generating forecast...")
+print(f"\n[4/5] Generating forecast for {target_dt.strftime('%A %H:%M UTC')}...")
 utc_now = datetime.datetime.now(pytz.UTC)
-current_weekday = utc_now.weekday()
-days_until_sunday = (6 - current_weekday) % 7
-if days_until_sunday == 0:
-    days_until_sunday = 7
-hours_to_sunday = days_until_sunday * 24 - utc_now.hour
-next_sunday = utc_now + datetime.timedelta(hours=hours_to_sunday)
 
 # Predict
 X_latest = scaler.transform(df[FEATURES].values[-1:])
@@ -116,7 +161,7 @@ price_upper = current_price * np.exp(forecast_return + 2*forecast_std)
 # Market regime
 regime = "BULL" if forecast_return > 0 else "BEAR"
 
-print(f"  Target: Next Sunday {next_sunday.strftime('%Y-%m-%d %H:%M UTC')} ({hours_to_sunday}h away)")
+print(f"  Target: {target_dt.strftime('%A %H:%M UTC (%Y-%m-%d)')} ({hours_to_target:.1f}h away)")
 print(f"  Regime: {regime}")
 
 # =====================================================================
@@ -135,8 +180,8 @@ for name, config in scenarios.items():
     paths = []
     for _ in range(N_PATHS):
         price = current_price
-        for h in range(hours_to_sunday):
-            ret = forecast_return + (config['shock'] / hours_to_sunday) + np.random.normal(0, forecast_std)
+        for h in range(int(hours_to_target)):
+            ret = forecast_return + (config['shock'] / hours_to_target) + np.random.normal(0, forecast_std)
             price = price * np.exp(ret)
         paths.append(price)
 
@@ -166,8 +211,8 @@ BITCOIN PRICE FORECAST REPORT
 
 Generated: {utc_now.strftime('%Y-%m-%d %H:%M:%S UTC')}
 Current Price: ${current_price:.2f}
-Target: Next Sunday 12:00 AM UTC ({next_sunday.strftime('%Y-%m-%d %H:%M UTC')})
-Hours until target: {hours_to_sunday}
+Target: {target_dt.strftime('%A %H:%M UTC (%Y-%m-%d)')}
+Hours until target: {hours_to_target:.1f}
 
 ================================================================================
 FORECAST (CNN-LSTM + MC Bootstrap)
@@ -269,8 +314,8 @@ P(+5%): {np.mean(weighted_paths > current_price*1.05)*100:.1f}%
 P(+10%): {np.mean(weighted_paths > current_price*1.10)*100:.1f}%
 P(-5%): {np.mean(weighted_paths < current_price*0.95)*100:.1f}%
 
-Target: {next_sunday.strftime('%a %Y-%m-%d')}
-Hours: {hours_to_sunday}
+Target: {target_dt.strftime('%A %H:%M UTC')}
+Hours: {hours_to_target:.1f}
 Regime: {regime}
 """
 ax.text(0.1, 0.5, summary_text, color='white', fontsize=11, family='monospace',

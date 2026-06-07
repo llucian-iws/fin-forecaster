@@ -26,9 +26,20 @@ from tensorflow.keras import layers
 import datetime
 import pytz
 from pathlib import Path
+import sys
+import os
+import argparse
 
 OUTPUT_DIR = Path("/app/results")
 OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
+
+# Parse command-line arguments or environment variables for target date/time
+parser = argparse.ArgumentParser(description='Bitcoin Price Forecaster')
+parser.add_argument('--target-date', type=str, default=os.getenv('TARGET_DATE'),
+                    help='Target date in format YYYY-MM-DD or "next-<day>" (e.g., next-wednesday)')
+parser.add_argument('--target-hour', type=int, default=int(os.getenv('TARGET_HOUR', 0)),
+                    help='Target hour in UTC (0-23, default 0 for midnight)')
+args = parser.parse_args()
 
 print("=" * 80)
 print("BITCOIN PRICE FORECASTER | Full Quantitative Stack (CNN-LSTM + HMM)")
@@ -38,6 +49,47 @@ LOOKBACK_HOURS = 168
 HORIZON_HOURS = 24
 MODEL_EPOCHS = 5
 VERBOSE = 1
+N_MC = 200
+
+def calculate_target_datetime(target_date_arg, target_hour):
+    utc_now = datetime.datetime.now(pytz.UTC)
+    weekdays = {
+        'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3,
+        'friday': 4, 'saturday': 5, 'sunday': 6
+    }
+
+    if target_date_arg:
+        if target_date_arg.lower().startswith('next-'):
+            day_name = target_date_arg.lower().replace('next-', '')
+            if day_name not in weekdays:
+                print(f"Unknown day: {day_name}. Using next-wednesday.")
+                day_name = 'wednesday'
+            target_weekday = weekdays[day_name]
+            current_weekday = utc_now.weekday()
+            days_until = (target_weekday - current_weekday) % 7
+            if days_until == 0:
+                days_until = 7
+            target = utc_now + datetime.timedelta(days=days_until)
+        else:
+            try:
+                target = datetime.datetime.strptime(target_date_arg, '%Y-%m-%d')
+                target = pytz.UTC.localize(target)
+            except ValueError:
+                print(f"Invalid date format: {target_date_arg}. Using next-wednesday.")
+                return calculate_target_datetime('next-wednesday', target_hour)
+    else:
+        target_weekday = 2
+        current_weekday = utc_now.weekday()
+        days_until = (target_weekday - current_weekday) % 7
+        if days_until == 0:
+            days_until = 7
+        target = utc_now + datetime.timedelta(days=days_until)
+
+    target = target.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+    hours_to_target = (target - utc_now).total_seconds() / 3600.0
+    return target, hours_to_target
+
+target_dt, hours_to_target = calculate_target_datetime(args.target_date, args.target_hour)
 
 # =====================================================================
 # SECTION 1: Data Fetching & Feature Engineering
@@ -274,33 +326,19 @@ mc_lower = log_rets_to_prices(current_price, live_mean[0] - 2*live_std[0])
 mc_upper = log_rets_to_prices(current_price, live_mean[0] + 2*live_std[0])
 
 # =====================================================================
-# SECTION 5: Find Next Sunday 12:00 AM UTC
+# SECTION 5: Target Date/Time Forecast
 # =====================================================================
-print("\n[5/6] Calculating forecast for next Wednesday 12:00 AM UTC...")
-
-utc_now = datetime.datetime.now(pytz.UTC)
-current_weekday = utc_now.weekday()
-
-# Wednesday is weekday 2 (Monday=0, Tuesday=1, Wednesday=2)
-if current_weekday == 2:
-    hours_to_target = 24
-else:
-    days_until_target = (2 - current_weekday) % 7
-    if days_until_target == 0:
-        days_until_target = 7
-    hours_to_target = days_until_target * 24 - utc_now.hour + 0
-
-next_target = utc_now + datetime.timedelta(hours=hours_to_target)
-next_target = next_target.replace(hour=0, minute=0, second=0, microsecond=0)
+print(f"\n[5/6] Calculating forecast for target: {target_dt.strftime('%Y-%m-%d %H:%M UTC')}...")
 
 if hours_to_target > HORIZON_HOURS:
     forecast_hour_idx = HORIZON_HOURS - 1
 else:
     forecast_hour_idx = int(hours_to_target)
 
+utc_now = datetime.datetime.now(pytz.UTC)
 print(f"  Current time (UTC): {utc_now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-print(f"  Next Wednesday 12:00 AM UTC: {next_target.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-print(f"  Hours until target: {hours_to_target}")
+print(f"  Target time (UTC): {target_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+print(f"  Hours until target: {hours_to_target:.1f}")
 
 target_mean = mean_path[forecast_hour_idx]
 target_lower = lower_path[forecast_hour_idx]
@@ -311,7 +349,7 @@ target_mc_upper = mc_upper[forecast_hour_idx]
 target_pct_change = (target_mean / current_price - 1) * 100
 
 print(f"\n  ┌─────────────────────────────────────────────────────────┐")
-print(f"  │ BITCOIN FORECAST: Next Wednesday 12:00 AM UTC         │")
+print(f"  │ BITCOIN FORECAST: {target_dt.strftime('%A %H:%M UTC')} ({target_dt.strftime('%Y-%m-%d')})       │")
 print(f"  ├─────────────────────────────────────────────────────────┤")
 print(f"  │ Current price:        ${current_price:.2f}                    │")
 print(f"  │ Mean forecast:        ${target_mean:.2f} ({target_pct_change:+.2f}%)        │")
@@ -326,7 +364,7 @@ print(f"  └──────────────────────�
 print("\n[6/6] Running scenario analysis (10,000 paths)...")
 
 N_PATHS = 10000
-pre_mean_hourly = float(np.mean(live_mean[0][:int(hours_to_sunday/6)+1]))
+pre_mean_hourly = float(np.mean(live_mean[0][:int(hours_to_target/6)+1]))
 pre_vol = float(df['vol_24h'].iloc[-1])
 
 SCENARIOS = {
@@ -354,12 +392,12 @@ scenario_paths = {}
 scenario_stats = {}
 
 for name, s in SCENARIOS.items():
-    paths = np.zeros((N_PATHS, int(hours_to_sunday)))
+    paths = np.zeros((N_PATHS, int(hours_to_target)))
     for p_idx in range(N_PATHS):
         price = current_price
-        for h in range(int(hours_to_sunday)):
+        for h in range(int(hours_to_target)):
             ret = pre_mean_hourly + np.random.normal(0, pre_vol)
-            ret += s['shock'] / hours_to_sunday
+            ret += s['shock'] / hours_to_target
             price = price * np.exp(ret)
             paths[p_idx, h] = price
 
@@ -414,12 +452,12 @@ for ax in axes.flat:
 ax = axes[0, 0]
 recent_df = df.tail(168)
 ax.plot(recent_df.index, recent_df['Close'], color='#ffdd44', lw=2, label='BTC (last 7d)', zorder=5)
-forecast_hours = np.arange(int(hours_to_sunday))
+forecast_hours = np.arange(int(hours_to_target))
 forecast_times = [df.index[-1] + datetime.timedelta(hours=h) for h in forecast_hours]
-ax.plot(forecast_times, mean_path[:int(hours_to_sunday)], color='cyan', lw=2, ls='--', label='CNN-LSTM Mean', zorder=6)
-ax.fill_between(forecast_times, lower_path[:int(hours_to_sunday)], upper_path[:int(hours_to_sunday)],
+ax.plot(forecast_times, mean_path[:int(hours_to_target)], color='cyan', lw=2, ls='--', label='CNN-LSTM Mean', zorder=6)
+ax.fill_between(forecast_times, lower_path[:int(hours_to_target)], upper_path[:int(hours_to_target)],
                  alpha=0.15, color='cyan', label='90% CI', zorder=4)
-ax.axvline(next_sunday, color='lime', lw=2, ls=':', alpha=0.8, label='Target: Sunday 12 AM UTC')
+ax.axvline(target_dt, color='lime', lw=2, ls=':', alpha=0.8, label=f"Target: {target_dt.strftime('%A %H:%M UTC')}")
 ax.set_ylabel('Price (USD)', color='white')
 ax.set_title('Bitcoin Price + CNN-LSTM Forecast', color='white', fontsize=11)
 ax.legend(loc='best', facecolor='#0a0a0a', labelcolor='white', fontsize=8)
@@ -437,7 +475,7 @@ ax.grid(True, alpha=0.2)
 
 # Panel 3: Scenario fan chart
 ax = axes[1, 0]
-hours_array = np.arange(1, int(hours_to_sunday) + 1)
+hours_array = np.arange(1, int(hours_to_target) + 1)
 for name, s in SCENARIOS.items():
     paths = scenario_paths[name]
     p50 = np.percentile(paths, 50, axis=0)
@@ -448,7 +486,7 @@ for name, s in SCENARIOS.items():
 
 ax.axhline(current_price, color='white', lw=1, ls=':', alpha=0.5)
 ax.set_ylabel('Price (USD)', color='white')
-ax.set_xlabel('Hours until Sunday 12 AM UTC', color='white')
+ax.set_xlabel(f"Hours until {target_dt.strftime('%A %H:%M UTC')}", color='white')
 ax.set_title('Event Scenario Analysis (10k paths)', color='white', fontsize=11)
 ax.legend(facecolor='#0a0a0a', labelcolor='white', fontsize=7.5)
 ax.grid(True, alpha=0.2)
@@ -485,8 +523,8 @@ with open(report_file, 'w') as f:
     f.write(f"Current Price: ${current_price:.2f}\n")
     f.write(f"Current Regime: {current_regime}\n\n")
 
-    f.write(f"TARGET: Wednesday 12:00 AM UTC ({next_target.strftime('%Y-%m-%d %H:%M:%S')})\n")
-    f.write(f"Hours until target: {hours_to_target}\n\n")
+    f.write(f"TARGET: {target_dt.strftime('%A %H:%M UTC (%Y-%m-%d)')}\n")
+    f.write(f"Hours until target: {hours_to_target:.1f}\n\n")
 
     f.write("FORECAST (CNN-LSTM + MC Dropout):\n")
     f.write(f"  Mean price:         ${target_mean:.2f} ({target_pct_change:+.2f}%)\n")

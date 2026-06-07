@@ -8,5 +8,12 @@ services:
       - ./results:/app/results
     environment:
       - TF_CPP_MIN_LOG_LEVEL=2
+      # Target date/time for forecast (optional)
+      # TARGET_DATE: "next-wednesday"  # or YYYY-MM-DD format (e.g., "2026-06-10")
+      # TARGET_HOUR: 12                 # 0-23 (default 0 for midnight UTC)
     stdin_open: true
     tty: true
+    # Override command to run lite version (faster):
+    # command: python btc_forecast_lite.py
+    # Pass custom target date:
+    # command: python btc_forecast.py --target-date next-wednesday --target-hour 12
