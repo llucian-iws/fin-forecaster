@@ -175,17 +175,15 @@ scenarios = {
     'BEAR (-6%)': {'shock': -0.06, 'prob': 0.25, 'color': '#ff4444'}
 }
 
+H = int(hours_to_target)
 scenario_results = {}
 for name, config in scenarios.items():
-    paths = []
-    for _ in range(N_PATHS):
-        price = current_price
-        for h in range(int(hours_to_target)):
-            ret = forecast_return + (config['shock'] / hours_to_target) + np.random.normal(0, forecast_std)
-            price = price * np.exp(ret)
-        paths.append(price)
-
-    paths = np.array(paths)
+    # Vectorized GBM: each path's final price = current * exp(sum of H hourly
+    # log-returns). Identical draws/distribution to the per-step loop, just no
+    # Python inner loop.
+    drift = forecast_return + config['shock'] / hours_to_target
+    rets = drift + np.random.normal(0, forecast_std, size=(N_PATHS, H))
+    paths = current_price * np.exp(rets.sum(axis=1))
     scenario_results[name] = {
         'mean': paths.mean(),
         'median': np.median(paths),
