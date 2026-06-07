@@ -17,5 +17,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY btc_forecast.py .
 COPY btc_forecast_lite.py .
 
+# Create results directory with proper permissions for volume mount
+RUN mkdir -p /app/results && chmod 777 /app/results
+
 # Default command (full sophisticated version)
 CMD ["python", "btc_forecast.py"]

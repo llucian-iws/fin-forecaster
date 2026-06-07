@@ -27,8 +27,8 @@ import datetime
 import pytz
 from pathlib import Path
 
-OUTPUT_DIR = Path("results")
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path("/app/results")
+OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
 
 print("=" * 80)
 print("BITCOIN PRICE FORECASTER | Full Quantitative Stack (CNN-LSTM + HMM)")

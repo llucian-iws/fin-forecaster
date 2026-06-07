@@ -20,8 +20,8 @@ from pathlib import Path
 import datetime
 import pytz
 
-OUTPUT_DIR = Path("results")
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path("/app/results")
+OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
 
 print("=" * 80)
 print("BITCOIN PRICE FORECASTER - LITE VERSION")
