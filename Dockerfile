@@ -13,6 +13,9 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Unbuffer stdout so progress past the training bar is visible in real time
+ENV PYTHONUNBUFFERED=1
+
 # Copy prediction scripts
 COPY btc_forecast.py .
 COPY btc_forecast_lite.py .

@@ -47,7 +47,7 @@ print("=" * 80)
 
 LOOKBACK_HOURS = 168
 HORIZON_HOURS = 24
-MODEL_EPOCHS = 1
+MODEL_EPOCHS = 5
 VERBOSE = 1
 N_MC = 200
 
@@ -285,55 +285,57 @@ hist = model.fit(
 
 test_loss = model.evaluate(X_test, y_test, verbose=0)
 print(f"  Test Loss (scaled): {test_loss:.5f}")
+sys.stdout.flush()
 
 # =====================================================================
 # SECTION 4: Monte Carlo Dropout Inference
 # =====================================================================
 print("\n[4/6] Running Monte Carlo dropout inference (200 passes)...")
+sys.stdout.flush()
 
 N_MC = 200
 
 def mc_predict(model, X, n_samples=N_MC):
-    preds = np.array([model(X, training=True).numpy() for _ in range(n_samples)])
-    preds = preds.squeeze()
-    if preds.ndim == 1:
-        preds = preds.reshape(-1, 1)
-    mean = preds.mean(axis=0)
-    std = preds.std(axis=0)
-    return mean.reshape(1, -1), std.reshape(1, -1)
+    # Replicate the single input n_samples times and run ONE batched forward pass
+    # with dropout active: each row draws an independent dropout mask, giving
+    # n_samples MC samples in one LSTM forward instead of n_samples eager calls.
+    X_rep = np.repeat(X, n_samples, axis=0)
+    preds = model(X_rep, training=True).numpy().reshape(n_samples, -1)
+    return preds.mean(axis=0), preds.std(axis=0)
 
 print("  Calibrating conformal prediction bands...")
-v_mean, v_std = mc_predict(model, X_val, n_samples=50)
-cal_err = np.abs(v_mean.flatten() - y_val)
-alpha = 0.10
+# MC-dropout mean over the validation set (same estimator as the live forecast),
+# 50 stochastic passes — matches the original calibration semantics.
+val_preds = np.stack([model(X_val, training=True).numpy().flatten() for _ in range(50)])
+cal_err = np.abs(val_preds.mean(axis=0) - y_val)
 q_hat = np.percentile(cal_err, 90)
 
 print(f"  Conformal quantile (90% coverage): ±{q_hat*100:.3f}% log-ret")
 
 print("  Running live inference...")
 X_live = X_scaled[-LOOKBACK_HOURS:].reshape(1, LOOKBACK_HOURS, -1)
-live_mean, live_std = mc_predict(model, X_live, n_samples=N_MC)
-
-def log_rets_to_prices(start_price, log_rets):
-    cum = np.concatenate([[0.0], np.cumsum(log_rets)])
-    return float(start_price) * np.exp(cum[1:])
+live_mean_v, live_std_v = mc_predict(model, X_live, n_samples=N_MC)
+hourly_ret = float(live_mean_v[0])
+hourly_std = float(live_std_v[0])
 
 current_price = float(df['Close'].values[-1])
-mean_path = log_rets_to_prices(current_price, live_mean[0])
-lower_path = log_rets_to_prices(current_price, live_mean[0] - q_hat)
-upper_path = log_rets_to_prices(current_price, live_mean[0] + q_hat)
-mc_lower = log_rets_to_prices(current_price, live_mean[0] - 2*live_std[0])
-mc_upper = log_rets_to_prices(current_price, live_mean[0] + 2*live_std[0])
+
+# Model predicts the mean hourly log-return; the forecast horizon is capped at
+# the model's HORIZON_HOURS. Compound that hourly return into a price path.
+n_h = max(1, min(int(round(hours_to_target)), HORIZON_HOURS))
+horizon = np.arange(1, n_h + 1)
+mean_path  = current_price * np.exp(hourly_ret * horizon)
+lower_path = current_price * np.exp((hourly_ret - q_hat) * horizon)
+upper_path = current_price * np.exp((hourly_ret + q_hat) * horizon)
+mc_lower   = current_price * np.exp((hourly_ret - 2 * hourly_std) * horizon)
+mc_upper   = current_price * np.exp((hourly_ret + 2 * hourly_std) * horizon)
 
 # =====================================================================
 # SECTION 5: Target Date/Time Forecast
 # =====================================================================
 print(f"\n[5/6] Calculating forecast for target: {target_dt.strftime('%Y-%m-%d %H:%M UTC')}...")
 
-if hours_to_target > HORIZON_HOURS:
-    forecast_hour_idx = HORIZON_HOURS - 1
-else:
-    forecast_hour_idx = int(hours_to_target)
+forecast_hour_idx = n_h - 1
 
 utc_now = datetime.datetime.now(pytz.UTC)
 print(f"  Current time (UTC): {utc_now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
@@ -364,7 +366,7 @@ print(f"  └──────────────────────�
 print("\n[6/6] Running scenario analysis (10,000 paths)...")
 
 N_PATHS = 10000
-pre_mean_hourly = float(np.mean(live_mean[0][:int(hours_to_target/6)+1]))
+pre_mean_hourly = hourly_ret
 pre_vol = float(df['vol_24h'].iloc[-1])
 
 SCENARIOS = {
@@ -391,15 +393,12 @@ SCENARIOS = {
 scenario_paths = {}
 scenario_stats = {}
 
+H = int(hours_to_target)
 for name, s in SCENARIOS.items():
-    paths = np.zeros((N_PATHS, int(hours_to_target)))
-    for p_idx in range(N_PATHS):
-        price = current_price
-        for h in range(int(hours_to_target)):
-            ret = pre_mean_hourly + np.random.normal(0, pre_vol)
-            ret += s['shock'] / hours_to_target
-            price = price * np.exp(ret)
-            paths[p_idx, h] = price
+    # Vectorized GBM: hourly log-returns = drift + N(0, pre_vol), price = cumprod
+    drift = pre_mean_hourly + s['shock'] / hours_to_target
+    rets = drift + np.random.normal(0, pre_vol, size=(N_PATHS, H))
+    paths = current_price * np.exp(np.cumsum(rets, axis=1))
 
     final_prices = paths[:, -1]
     scenario_paths[name] = paths
@@ -452,10 +451,10 @@ for ax in axes.flat:
 ax = axes[0, 0]
 recent_df = df.tail(168)
 ax.plot(recent_df.index, recent_df['Close'], color='#ffdd44', lw=2, label='BTC (last 7d)', zorder=5)
-forecast_hours = np.arange(int(hours_to_target))
-forecast_times = [df.index[-1] + datetime.timedelta(hours=h) for h in forecast_hours]
-ax.plot(forecast_times, mean_path[:int(hours_to_target)], color='cyan', lw=2, ls='--', label='CNN-LSTM Mean', zorder=6)
-ax.fill_between(forecast_times, lower_path[:int(hours_to_target)], upper_path[:int(hours_to_target)],
+forecast_hours = np.arange(n_h)
+forecast_times = [df.index[-1] + datetime.timedelta(hours=int(h)) for h in forecast_hours]
+ax.plot(forecast_times, mean_path, color='cyan', lw=2, ls='--', label='CNN-LSTM Mean', zorder=6)
+ax.fill_between(forecast_times, lower_path, upper_path,
                  alpha=0.15, color='cyan', label='90% CI', zorder=4)
 ax.axvline(target_dt, color='lime', lw=2, ls=':', alpha=0.8, label=f"Target: {target_dt.strftime('%A %H:%M UTC')}")
 ax.set_ylabel('Price (USD)', color='white')
@@ -513,7 +512,13 @@ plt.close()
 # =====================================================================
 # Summary Report
 # =====================================================================
+print("\n[6/6] Writing forecast report...")
+sys.stdout.flush()
+
 report_file = OUTPUT_DIR / 'forecast_report.txt'
+print(f"  Writing to: {report_file}")
+sys.stdout.flush()
+
 with open(report_file, 'w') as f:
     f.write("=" * 70 + "\n")
     f.write("BITCOIN PRICE FORECAST REPORT - CNN-LSTM + HMM + Monte Carlo\n")
