@@ -150,13 +150,21 @@ for _ in range(100):
     predictions.append(pred)
 
 predictions = np.array(predictions)
-forecast_return = predictions.mean()
-forecast_std = predictions.std()
+forecast_return = predictions.mean()          # predicted per-hour log return
 
-# Convert return to price
-forecast_price = current_price * np.exp(forecast_return)
-price_lower = current_price * np.exp(forecast_return - 2*forecast_std)
-price_upper = current_price * np.exp(forecast_return + 2*forecast_std)
+# Uncertainty is driven by realized return volatility (24h rolling std of
+# hourly log returns), scaled to the target horizon as a random walk. The GBM
+# bootstrap std is ~0 (trees are flat to tiny input noise), so it cannot
+# represent price uncertainty on its own.
+sigma_h = float(df['vol'].iloc[-1])
+horizon_ret = forecast_return * hours_to_target
+horizon_std = sigma_h * np.sqrt(hours_to_target)
+forecast_std = horizon_std
+
+# Convert to price at the target horizon
+forecast_price = current_price * np.exp(horizon_ret)
+price_lower = current_price * np.exp(horizon_ret - 2*horizon_std)
+price_upper = current_price * np.exp(horizon_ret + 2*horizon_std)
 
 # Market regime
 regime = "BULL" if forecast_return > 0 else "BEAR"
@@ -182,7 +190,7 @@ for name, config in scenarios.items():
     # log-returns). Identical draws/distribution to the per-step loop, just no
     # Python inner loop.
     drift = forecast_return + config['shock'] / hours_to_target
-    rets = drift + np.random.normal(0, forecast_std, size=(N_PATHS, H))
+    rets = drift + np.random.normal(0, sigma_h, size=(N_PATHS, H))
     paths = current_price * np.exp(rets.sum(axis=1))
     scenario_results[name] = {
         'mean': paths.mean(),
