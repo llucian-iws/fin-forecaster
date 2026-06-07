@@ -36,7 +36,7 @@ print("=" * 80)
 
 LOOKBACK_HOURS = 168
 HORIZON_HOURS = 24
-MODEL_EPOCHS = 100
+MODEL_EPOCHS = 5
 VERBOSE = 1
 
 # =====================================================================
@@ -231,8 +231,8 @@ hist = model.fit(
     verbose=VERBOSE
 )
 
-test_loss, test_mae = model.evaluate(X_test, y_test, verbose=0)
-print(f"  Test MAE (scaled): {test_mae:.5f}")
+test_loss = model.evaluate(X_test, y_test, verbose=0)
+print(f"  Test Loss (scaled): {test_loss:.5f}")
 
 # =====================================================================
 # SECTION 4: Monte Carlo Dropout Inference
@@ -242,8 +242,10 @@ print("\n[4/6] Running Monte Carlo dropout inference (200 passes)...")
 N_MC = 200
 
 def mc_predict(model, X, n_samples=N_MC):
-    preds = np.stack([model(X, training=True).numpy() for _ in range(n_samples)], axis=0)
-    return preds.mean(axis=0), preds.std(axis=0)
+    preds = np.stack([model(X, training=True).numpy().flatten() for _ in range(n_samples)], axis=0)
+    mean = preds.mean(axis=0)
+    std = preds.std(axis=0)
+    return mean.reshape(1, -1) if mean.ndim == 1 else mean, std.reshape(1, -1) if std.ndim == 1 else std
 
 print("  Calibrating conformal prediction bands...")
 v_mean, v_std = mc_predict(model, X_val, n_samples=50)
