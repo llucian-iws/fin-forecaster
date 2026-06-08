@@ -1,0 +1,21 @@
+======================================================================
+SPY VOLATILITY FORECAST REPORT - ^VIX + EWMA/GARCH
+======================================================================
+
+Generated: 2026-06-08 08:06:26 UTC
+Current Price: $737.55
+Horizon: 2 days
+
+IMPLIED VOLATILITY (^VIX):
+  Current implied vol (annualized): 19.75%
+  Vol regime:                       ELEVATED (70th pct of recent history)
+
+REALIZED VOLATILITY (annualized):
+  Current rolling RV:           12.94%
+  Current EWMA (RiskMetrics):   10.59%
+  Horizon forecast [GARCH(1,1)]: 11.88%
+
+IV - RV SPREAD (variance-risk premium):
+  Implied - forecast RV = +7.87 vol points
+  Implied >> realized: positive variance-risk premium (options richly priced; vol-sellers favored).
+

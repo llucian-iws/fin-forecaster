@@ -1,0 +1,21 @@
+======================================================================
+BTC-USD VOLATILITY FORECAST REPORT - Deribit DVOL (BTC) + EWMA/GARCH
+======================================================================
+
+Generated: 2026-06-08 08:06:20 UTC
+Current Price: $63121.91
+Horizon: 52 hours
+
+IMPLIED VOLATILITY (Deribit DVOL (BTC)):
+  Current implied vol (annualized): 47.96%
+  Vol regime:                       HIGH (93th pct of recent history)
+
+REALIZED VOLATILITY (annualized):
+  Current rolling RV:           59.84%
+  Current EWMA (RiskMetrics):   58.12%
+  Horizon forecast [GARCH(1,1)]: 48.35%
+
+IV - RV SPREAD (variance-risk premium):
+  Implied - forecast RV = -0.39 vol points
+  Implied ~ realized: variance-risk premium near neutral.
+
