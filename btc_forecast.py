@@ -20,9 +20,8 @@ from sklearn.preprocessing import RobustScaler, MinMaxScaler
 from sklearn.model_selection import TimeSeriesSplit
 from scipy.stats import norm
 from hmmlearn.hmm import GaussianHMM
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
+# NOTE: tensorflow/keras are imported lazily in Section 3 (price path only) so
+# the --volatility-only path never loads TensorFlow.
 import datetime
 import pytz
 from pathlib import Path
@@ -42,6 +41,14 @@ parser.add_argument('--target-hour', type=int, default=int(os.getenv('TARGET_HOU
 parser.add_argument('--runs', type=int, default=int(os.getenv('RUNS', 1)),
                     help='Number of full train/infer cycles to average (default 1). '
                          'Each run retrains with a different seed; the forecast is the mean.')
+parser.add_argument('--volatility-only', action='store_true',
+                    default=os.getenv('VOLATILITY_ONLY', '').lower() in ('1', 'true', 'yes'),
+                    help='Forecast volatility (implied + EWMA/GARCH realized) and skip the '
+                         'CNN-LSTM price path entirely (no TensorFlow).')
+parser.add_argument('--asset', choices=['crypto', 'stock'], default=os.getenv('ASSET', 'crypto'),
+                    help='Asset class for --volatility-only (default crypto).')
+parser.add_argument('--ticker', type=str, default=os.getenv('TICKER'),
+                    help='Ticker for --volatility-only (default BTC-USD for crypto, SPY for stock).')
 args = parser.parse_args()
 
 print("=" * 80)
@@ -94,6 +101,123 @@ def calculate_target_datetime(target_date_arg, target_hour):
     return target, hours_to_target
 
 target_dt, hours_to_target = calculate_target_datetime(args.target_date, args.target_hour)
+
+# =====================================================================
+# VOLATILITY-ONLY PATH (lightweight; no TensorFlow / no CNN-LSTM)
+# Works for crypto (Deribit DVOL + hourly RV) and stocks (CBOE VIX-family or
+# option-chain ATM IV + daily RV). Self-contained: fetches its own asset data
+# and exits before the price path.
+# =====================================================================
+if args.volatility_only:
+    import volatility
+
+    # Index ETFs / indices map to their CBOE implied-vol index (keyless yfinance).
+    VIX_MAP = {
+        'SPY': '^VIX', '^GSPC': '^VIX', 'QQQ': '^VXN', '^NDX': '^VXN',
+        'IWM': '^RVX', '^RUT': '^RVX', 'DIA': '^VXD', '^DJI': '^VXD',
+    }
+
+    def fetch_equity_iv(ticker, spot):
+        # CBOE VIX-family index for the common index ETFs, else ~30-day ATM
+        # implied vol from the option chain. Returns (iv_df, label).
+        sym = VIX_MAP.get(ticker.upper())
+        if sym:
+            v = yf.download(sym, period='6mo', interval='1d', progress=False)
+            if isinstance(v.columns, pd.MultiIndex):
+                v.columns = v.columns.droplevel(-1)
+            close = v['Close'].dropna()
+            if len(close):
+                return pd.DataFrame({'close': close.values}), sym
+        # Single names: ~30-day ATM IV from the option chain, but only during US
+        # market hours — Yahoo's per-contract IV is stale/near-zero after-hours.
+        et = datetime.datetime.now(pytz.timezone('US/Eastern'))
+        if not (et.weekday() < 5 and (9, 30) <= (et.hour, et.minute) and et.hour < 16):
+            print("  [volatility] option IV skipped (US market closed; "
+                  "Yahoo per-contract IV is unreliable after-hours)")
+            return None, 'option-chain IV (market closed)'
+        try:
+            tk = yf.Ticker(ticker)
+            exps = tk.options
+            if exps:
+                today = datetime.date.today()
+                exp = min(exps, key=lambda e: abs(
+                    (datetime.date.fromisoformat(e) - today).days - 30))
+                chain = tk.option_chain(exp)
+                ivs = []
+                for leg in (chain.calls, chain.puts):
+                    leg = leg.dropna(subset=['impliedVolatility'])
+                    # Drop Yahoo's near-zero / garbage IVs (common after-hours).
+                    # Real single-name ATM IV is ~>5% annualized; below that is stale.
+                    leg = leg[(leg['impliedVolatility'] > 0.05) & (leg['impliedVolatility'] < 5.0)]
+                    if len(leg):
+                        atm = leg.iloc[(leg['strike'] - spot).abs().argsort().values[:3]]
+                        ivs.extend(atm['impliedVolatility'].tolist())
+                if ivs:
+                    return pd.DataFrame({'close': [float(np.mean(ivs)) * 100]}), f'{ticker} ATM IV'
+        except Exception as exc:
+            print(f"  [volatility] option-chain IV failed: {exc}")
+        return None, 'option-chain IV (unavailable)'
+
+    asset = args.asset
+    ticker = args.ticker or ('BTC-USD' if asset == 'crypto' else 'SPY')
+    print(f"\n[VOLATILITY-ONLY] {asset} {ticker} -> target {target_dt.strftime('%Y-%m-%d %H:%M UTC')}")
+
+    if asset == 'crypto':
+        vdf = yf.download(ticker, period='90d', interval='1h', progress=False)
+        if isinstance(vdf.columns, pd.MultiIndex):
+            vdf.columns = vdf.columns.droplevel(-1)
+        close = vdf['Close'].dropna()
+        ann = np.sqrt(24 * 365)
+        rv_window = 24
+        horizon_steps = max(1, int(round(hours_to_target)))
+        horizon_unit = 'hours'
+        currency = ticker.split('-')[0].upper()
+        iv_df = volatility.fetch_dvol(currency=currency, resolution='3600', days=60)
+        iv_label = f'Deribit DVOL ({currency})'
+    else:
+        pdf = yf.download(ticker, period='2y', interval='1d', progress=False)
+        if isinstance(pdf.columns, pd.MultiIndex):
+            pdf.columns = pdf.columns.droplevel(-1)
+        close = pdf['Close'].dropna()
+        ann = np.sqrt(252)
+        rv_window = 21
+        horizon_steps = max(1, int(round(hours_to_target / 24)))
+        horizon_unit = 'days'
+
+    if len(close) < 2:
+        print(f"  ERROR: no price data for {ticker}")
+        sys.exit(1)
+
+    cur_price = float(close.iloc[-1])
+    log_ret = np.log(close / close.shift(1)).dropna()
+
+    if asset == 'stock':
+        iv_df, iv_label = fetch_equity_iv(ticker, cur_price)
+
+    if iv_df is not None:
+        print(f"  Implied vol [{iv_label}]: {len(iv_df)} point(s), "
+              f"latest = {float(iv_df['close'].iloc[-1]):.2f}%")
+    else:
+        print(f"  Implied vol [{iv_label}] unavailable -> realized-vol-only report.")
+
+    info = volatility.forecast_volatility(
+        log_ret, horizon_steps=horizon_steps, ann=ann, rv_window=rv_window,
+        iv_df=iv_df, iv_label=iv_label)
+
+    utc_now = datetime.datetime.now(pytz.UTC)
+    report_file = OUTPUT_DIR / 'forecast_report.txt'
+    report = volatility.write_report(
+        report_file, info,
+        generated_utc=utc_now.strftime('%Y-%m-%d %H:%M:%S UTC'),
+        asset_name=ticker, horizon_steps=horizon_steps, horizon_unit=horizon_unit,
+        current_price=cur_price)
+
+    print("\n" + report)
+    print(f"\n  Saved: {report_file}")
+    print("\n" + "=" * 80)
+    print(f"✅ VOLATILITY FORECAST COMPLETE! Saved to: {OUTPUT_DIR}")
+    print("=" * 80)
+    sys.exit(0)
 
 # =====================================================================
 # SECTION 1: Data Fetching & Feature Engineering
@@ -213,6 +337,12 @@ print(f"  State mean returns: {[(state_map[s], f'{state_returns[s]*100:.4f}%/hou
 # SECTION 3: CNN-LSTM Model Training (Sophisticated Deep Learning)
 # =====================================================================
 print("\n[3/6] Building & training CNN-LSTM model (deep learning)...")
+
+# Lazy TensorFlow import: only the price path needs it (the --volatility-only
+# path exits earlier, so it never loads TensorFlow).
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
 
 FEATURES = [
     'log_ret', 'vol_24h', 'vol_12h',
