@@ -513,7 +513,40 @@ print("\n[6/6] Running scenario analysis (10,000 paths)...")
 
 N_PATHS = 10000
 pre_mean_hourly = hourly_ret
-pre_vol = float(df['vol_24h'].iloc[-1])
+
+# --- Volatility model feeds the scenario shock ------------------------------
+# Run the forward-vol model (Deribit DVOL implied + GARCH(1,1) on the same
+# hourly log-returns) and use its forward estimate as the MC shock std, instead
+# of raw trailing realized vol. Falls back to realized vol_24h if it fails.
+import volatility
+ANN_HOURLY = np.sqrt(24 * 365)
+realized_pre_vol = float(df['vol_24h'].iloc[-1])
+try:
+    dvol_df = volatility.fetch_dvol(currency='BTC', resolution='3600', days=60)
+    vol_info = volatility.forecast_volatility(
+        df['log_ret'], horizon_steps=max(1, int(round(hours_to_target))),
+        ann=ANN_HOURLY, rv_window=24, iv_df=dvol_df, iv_label='Deribit DVOL (BTC)')
+    # Blend GARCH forward realized with implied (DVOL) when available; both are
+    # annualized %, so divide by ANN_HOURLY to get an hourly log-return std.
+    fwd_components = [vol_info['forecast_rv']]
+    if vol_info['iv_available']:
+        fwd_components.append(vol_info['current_iv'])
+    fwd_vol_ann_pct = float(np.mean(fwd_components))
+    pre_vol = fwd_vol_ann_pct / 100.0 / ANN_HOURLY
+    if not np.isfinite(pre_vol) or pre_vol <= 0:
+        raise ValueError('non-finite forward vol')
+    vol_shock_source = (
+        f"forward model [GARCH {vol_info['forecast_rv']:.1f}%"
+        + (f" + DVOL {vol_info['current_iv']:.1f}%" if vol_info['iv_available'] else "")
+        + f" -> {fwd_vol_ann_pct:.1f}% ann -> {pre_vol*100:.3f}%/hr]")
+except Exception as exc:
+    pre_vol = realized_pre_vol
+    vol_info = None
+    vol_shock_source = f"realized vol_24h ({realized_pre_vol*100:.3f}%/hr); vol model failed: {exc}"
+
+realized_ann_pct = realized_pre_vol * 100.0 * ANN_HOURLY
+print(f"  Scenario shock vol: {pre_vol*100:.3f}%/hr  <- {vol_shock_source}")
+print(f"  (trailing realized vol_24h = {realized_pre_vol*100:.3f}%/hr = {realized_ann_pct:.1f}% ann)")
 
 SCENARIOS = {
     'BULL: ETF approval / macro catalyst': {
@@ -682,6 +715,19 @@ with open(report_file, 'w') as f:
     f.write(f"  Mean price:         ${target_mean:.2f} ({target_pct_change:+.2f}%)\n")
     f.write(f"  90% CI:             ${target_lower:.2f} - ${target_upper:.2f}\n")
     f.write(f"  MC range (2σ):      ${target_mc_lower:.2f} - ${target_mc_upper:.2f}\n\n")
+
+    f.write("VOLATILITY MODEL (scenario shock input):\n")
+    f.write(f"  Shock vol used:     {pre_vol*100:.3f}%/hr ({pre_vol*100*ANN_HOURLY:.1f}% ann)\n")
+    if vol_info is not None:
+        if vol_info['iv_available']:
+            f.write(f"  Implied (DVOL):     {vol_info['current_iv']:.1f}% ann\n")
+        f.write(f"  Forward [{vol_info['forecast_method']}]: {vol_info['forecast_rv']:.1f}% ann\n")
+        f.write(f"  Trailing realized:  {realized_ann_pct:.1f}% ann\n")
+        if vol_info['iv_rv_spread'] is not None:
+            f.write(f"  IV - forecast RV:   {vol_info['iv_rv_spread']:+.1f} vol pts\n")
+    else:
+        f.write(f"  (forward vol unavailable; used trailing realized {realized_ann_pct:.1f}% ann)\n")
+    f.write("\n")
 
     f.write("SCENARIO ANALYSIS (10,000 paths each):\n")
     for name, stats in scenario_stats.items():

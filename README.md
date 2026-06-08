@@ -117,7 +117,7 @@ CNN-LSTM (Conv1D ×3 → LSTM ×2 → Dense), MC-dropout
         ▼
 Conformal bands (90%) + MC-dropout bounds
         ▼
-10,000-path BULL/BASE/BEAR scenario Monte Carlo  (shock vol = realized vol_24h)
+10,000-path BULL/BASE/BEAR scenario Monte Carlo  (shock vol = forward model: GARCH(1,1) ⊕ DVOL, falls back to realized vol_24h)
         ▼
 Report + 4-panel chart
 ```
