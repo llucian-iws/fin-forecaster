@@ -1,0 +1,45 @@
+======================================================================
+BITCOIN PRICE FORECAST REPORT - CNN-LSTM + HMM + Monte Carlo
+======================================================================
+
+Generated: 2026-06-07 23:54:46 UTC
+Current Price: $60850.36
+Current Regime: CHOP
+
+TARGET: Wednesday 12:00 UTC (2026-06-10)
+Hours until target: 60.3
+
+FORECAST (CNN-LSTM + MC Dropout):
+  Mean price:         $61975.94 (+1.85%)
+  90% CI:             $58719.74 - $65412.71
+  MC range (2σ):      $61341.17 - $62617.28
+
+SCENARIO ANALYSIS (10,000 paths each):
+
+  BULL: ETF approval / macro catalyst
+    Probability: 35%
+    Mean: $66307.97 | Median: $66253.44
+    P10-P90: $63191.86 - $69476.77
+    P(+5%): 83.8% | P(+10%): 39.3%
+    P(-5%): 0.0%
+
+  BASE: No major catalyst
+    Probability: 40%
+    Mean: $63728.80 | Median: $63665.97
+    P10-P90: $60772.32 - $66787.30
+    P(+5%): 46.1% | P(+10%): 8.9%
+    P(-5%): 0.5%
+
+  BEAR: Regulatory headwinds
+    Probability: 25%
+    Mean: $60031.87 | Median: $59984.29
+    P10-P90: $57231.67 - $62896.84
+    P(+5%): 4.3% | P(+10%): 0.1%
+    P(-5%): 15.7%
+
+
+PROBABILITY-WEIGHTED COMPOSITE:
+  Mean: $63707.28
+  P(+5%): 44.3%
+  P(+10%): 1.1%
+  P(-5%): 0.0%
