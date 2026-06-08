@@ -1,0 +1,53 @@
+======================================================================
+BITCOIN PRICE FORECAST REPORT - CNN-LSTM + HMM + Monte Carlo
+======================================================================
+
+Generated: 2026-06-08 22:56:38 UTC
+Current Price: $63308.26
+Current Regime: BEAR
+Runs averaged: 3 (epochs/run: 5)
+
+TARGET: Wednesday 12:00 UTC (2026-06-10)
+Hours until target: 37.8
+
+FORECAST (CNN-LSTM + MC Dropout):
+  Mean price:         $63815.59 (+0.80%)
+  90% CI:             $60434.08 - $67386.31
+  MC range (2σ):      $63422.18 - $64211.44
+
+VOLATILITY MODEL (scenario shock input):
+  Shock vol used:     0.622%/hr (58.2% ann)
+  Implied (DVOL):     45.6% ann
+  Forward [GARCH(1,1)]: 70.8% ann
+  Trailing realized:  61.4% ann
+  IV - forecast RV:   -25.2 vol pts
+
+SCENARIO ANALYSIS (10,000 paths each):
+
+  BULL: ETF approval / macro catalyst
+    Probability: 35%
+    Mean: $66702.77 | Median: $66644.06
+    P10-P90: $63432.09 - $70008.23
+    P(+5%): 52.7% | P(+10%): 12.6%
+    P(-5%): 0.2%
+
+  BASE: No major catalyst
+    Probability: 40%
+    Mean: $64102.84 | Median: $64012.44
+    P10-P90: $60963.50 - $67257.78
+    P(+5%): 17.1% | P(+10%): 1.4%
+    P(-5%): 4.9%
+
+  BEAR: Regulatory headwinds
+    Probability: 25%
+    Mean: $60478.03 | Median: $60419.83
+    P10-P90: $57584.05 - $63446.42
+    P(+5%): 0.6% | P(+10%): 0.0%
+    P(-5%): 45.0%
+
+
+PROBABILITY-WEIGHTED COMPOSITE:
+  Mean: $64106.62
+  P(+5%): 5.1%
+  P(+10%): 0.0%
+  P(-5%): 0.1%
