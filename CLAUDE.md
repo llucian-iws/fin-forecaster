@@ -61,3 +61,46 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 These guidelines are working if: fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+---
+
+# Project: fin-forecaster
+
+Quant forecasting stack for **price** and **volatility**, crypto + stocks. See
+`README.md` for full usage.
+
+## Layout
+- `btc_forecast.py` — full stack: CNN-LSTM + HMM + MC-dropout + conformal +
+  10k-path scenario Monte Carlo, plus the `--volatility-only` branch.
+- `volatility.py` — asset-agnostic vol math (numpy/pandas/requests only, **no
+  TensorFlow**): Deribit DVOL fetch, realized vol, EWMA, GARCH(1,1), report.
+- `btc_forecast_lite.py` — Gradient Boosting fallback (no TensorFlow).
+- `Dockerfile` / `docker-compose.yml` — Python 3.11 + TensorFlow runtime.
+
+## How it runs
+- **The price path needs Docker** (TensorFlow 2.13+ / Python 3.11). Build once
+  with `docker build -t fin-forecaster:latest .`, run with
+  `-v "$(pwd)/results:/app/results"` so outputs reach the host.
+- `OUTPUT_DIR = /app/results` is hard-coded — scripts only run cleanly inside
+  the container (the path is read-only on the host).
+- TensorFlow is imported **lazily** in Section 3, so `--volatility-only` never
+  loads it.
+- Run exactly **one container at a time**; clean up with `docker ps`/`docker kill`.
+
+## Flags / env
+`--target-date`/`TARGET_DATE` (`YYYY-MM-DD` or `next-<weekday>`),
+`--target-hour`/`TARGET_HOUR`, `--runs`/`RUNS` (average N retrains, distinct
+seeds), `MODEL_EPOCHS` (default 5), `--volatility-only`/`VOLATILITY_ONLY`,
+`--asset`/`ASSET` (`crypto|stock`), `--ticker`/`TICKER`.
+
+## Gotchas (learned the hard way)
+- **`--runs` must vary the seed per run** — a fixed seed makes averaging a no-op.
+- **Stdout is buffered when piped**; the Dockerfile sets `PYTHONUNBUFFERED=1` so
+  progress past the TF training bar is visible.
+- **MC dropout is batched** (replicate input → one forward pass), not N
+  sequential eager calls — same distribution, ~200× faster.
+- **Single-name option-chain IV only works during US market hours** (Yahoo IV is
+  stale after-hours); it's gated via pytz and degrades to realized-vol-only.
+- The model has a **24h horizon**; longer targets compound the hourly rate.
+- **No accuracy backtest exists yet** — don't claim accuracy gains without one
+  (walk-forward + interval coverage is the missing success metric).

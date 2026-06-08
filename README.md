@@ -1,254 +1,152 @@
-# Bitcoin Price Forecaster
+# fin-forecaster
 
-A comprehensive quantitative analysis stack for predicting Bitcoin price on Sunday at 12:00 AM UTC using ensemble machine learning, Hidden Markov Models, and Monte Carlo simulation.
+A quantitative forecasting stack for **price** and **volatility**, covering both
+**crypto** and **stocks**. Two complementary engines:
 
-## Features
+- **Price forecast** — a CNN-LSTM + HMM + Monte Carlo stack that predicts the
+  price at a configurable target date/time, with conformal + MC-dropout
+  uncertainty bands and 10,000-path event scenarios.
+- **Volatility forecast** (`--volatility-only`) — a lightweight implied-vs-realized
+  volatility model (Deribit DVOL / CBOE VIX-family, EWMA, GARCH(1,1)) that
+  reports the variance-risk premium. No TensorFlow needed.
 
-- **Data Source**: Real-time BTC-USD data from Yahoo Finance (hourly candles)
-- **Technical Indicators**: RSI, MACD, Bollinger Bands, ATR, EMAs, Volume normalization
-- **Regime Detection**: Hidden Markov Model (3-state: BEAR/CHOP/BULL)
-- **Forecasting**: CNN-LSTM Deep Learning Neural Network (sophisticated ensemble architecture)
-  - 1D Convolutional layers for feature extraction
-  - LSTM layers for temporal sequence learning
-  - MC Dropout for uncertainty quantification
-- **Uncertainty Quantification**: Conformal prediction bands + Monte Carlo Dropout
-- **Scenario Analysis**: Bull/Base/Bear event scenarios with 10,000 simulated paths
-- **Output**: Predictions, confidence intervals, scenario probabilities, visualizations
+## Quick start (Docker)
 
-## Quick Start
-
-### Using Docker (Recommended - Full Sophisticated Stack)
+The full CNN-LSTM model needs TensorFlow 2.13+ (Python 3.11), so it runs in
+Docker. Results are written to `./results/` via a volume mount.
 
 ```bash
-# Build and run in Docker (Python 3.11 + TensorFlow)
-make docker-run
+docker build -t fin-forecaster:latest .
 
-# Or use docker-compose directly
-docker-compose up --build
+# Price forecast (default target: next Wednesday 00:00 UTC)
+docker run --rm -v "$(pwd)/results:/app/results" fin-forecaster:latest \
+  python btc_forecast.py
+
+# Pick a target and average over several retrains
+docker run --rm -v "$(pwd)/results:/app/results" fin-forecaster:latest \
+  python btc_forecast.py --target-date next-wednesday --target-hour 12 --runs 3
 ```
 
-**Why Docker?** The full CNN-LSTM model requires TensorFlow 2.13+, which requires Python 3.11. Docker isolates the Python environment so you can run the sophisticated deep learning methods regardless of your local Python version.
+The local `btc_forecast_lite.py` (scikit-learn Gradient Boosting) is a fast
+fallback that runs without TensorFlow if you can't use Docker.
 
-### Local Installation (Lite Version)
+## Forecast modes
+
+### 1. Price forecast (default)
+
+CNN-LSTM predicts the mean hourly log-return over a 24h horizon; that rate is
+compounded to the target. Outputs a point forecast, a 90% conformal band,
+MC-dropout bounds, and probability-weighted BULL/BASE/BEAR scenarios.
+
+| Flag | Env | Default | Meaning |
+|------|-----|---------|---------|
+| `--target-date` | `TARGET_DATE` | `next-wednesday` | `YYYY-MM-DD` or `next-<weekday>` |
+| `--target-hour` | `TARGET_HOUR` | `0` | Target hour in UTC (0–23) |
+| `--runs N` | `RUNS` | `1` | Retrain N times (distinct seeds) and average the forecast |
+| — | `MODEL_EPOCHS` | `5` | Training epochs per run |
+
+`--runs` reduces the run-to-run variance from random init + MC sampling by
+averaging the stochastic outputs (hourly return, MC-dropout std, conformal
+quantile). Data fetch and HMM run once; only train/infer loops.
+
+### 2. Volatility forecast (`--volatility-only`)
+
+Skips the CNN-LSTM/price path entirely (no TensorFlow) and forecasts volatility:
+implied vol vs. realized vol, plus the IV−RV **variance-risk premium** and a
+regime label. Works for crypto and stocks.
+
+| Flag | Env | Default | Meaning |
+|------|-----|---------|---------|
+| `--volatility-only` | `VOLATILITY_ONLY` | off | Enable the volatility path |
+| `--asset` | `ASSET` | `crypto` | `crypto` or `stock` |
+| `--ticker` | `TICKER` | `BTC-USD` / `SPY` | Symbol to forecast |
 
 ```bash
-# Install dependencies
-make install
-# or
-pip install -r requirements.txt
+# Crypto: Deribit DVOL + hourly realized vol
+docker run --rm -v "$(pwd)/results:/app/results" fin-forecaster:latest \
+  python btc_forecast.py --volatility-only --ticker BTC-USD
 
-# Run lite forecast (Gradient Boosting - works on Python 3.14+)
-python3 btc_forecast_lite.py
+# Index ETF: CBOE VIX-family index + daily realized vol
+docker run --rm -v "$(pwd)/results:/app/results" fin-forecaster:latest \
+  python btc_forecast.py --volatility-only --asset stock --ticker SPY
+
+# Single name: ~30-day ATM IV from the option chain (US market hours only)
+docker run --rm -v "$(pwd)/results:/app/results" fin-forecaster:latest \
+  python btc_forecast.py --volatility-only --asset stock --ticker SNOW
 ```
 
-**Note:** Local execution uses the `btc_forecast_lite.py` (Gradient Boosting) because Python 3.14+ is not yet supported by TensorFlow. Use Docker for the full CNN-LSTM implementation.
+**Implied-vol sources** (all keyless):
 
-## Output Files
+| Asset | Implied vol | Realized vol annualization |
+|-------|-------------|----------------------------|
+| Crypto | Deribit DVOL (`get_volatility_index_data`) | hourly, √(24·365) |
+| Index ETF/index | CBOE VIX family via yfinance — `SPY→^VIX`, `QQQ→^VXN`, `IWM→^RVX`, `DIA→^VXD` | daily, √252 |
+| Single name | ~30-day ATM IV from the yfinance option chain | daily, √252 |
 
-The script generates results in the `results/` directory:
+The report shows current implied vol, rolling + EWMA realized vol, a GARCH(1,1)
+horizon forecast (falls back to EWMA if the fit is degenerate), and the
+`implied − forecast realized` spread with an interpretation.
 
-- **btc_forecast.png** - 4-panel visualization:
-  - Panel 1: BTC price with CNN-LSTM forecast and 90% confidence interval
-  - Panel 2: Model training loss (Gradient Boosting)
-  - Panel 3: Scenario analysis fan chart (10,000 paths per scenario)
-  - Panel 4: Sunday 12 AM UTC price distribution by scenario
+> **Single-name IV is gated to US market hours.** Yahoo's per-contract implied
+> vol is stale/near-zero after the close, so outside 13:30–20:00 UTC (weekdays)
+> a single name degrades to a realized-vol-only report. Index ETFs use the VIX
+> family and work any time.
 
-- **forecast_report.txt** - Detailed text report with:
-  - Current price and regime
-  - Sunday forecast with confidence intervals
-  - Scenario probabilities (Bull/Base/Bear)
-  - Probability of various price moves (+5%, +10%, -5%)
+## Output
 
-## Model Architecture
+Written to `results/` (mounted from the host):
 
-### 1. Data Processing
-- Fetch 24/7 hourly BTC-USD data (365+ days history)
-- Engineer 10 technical features:
-  - Volatility (12h, 24h rolling)
-  - Momentum (RSI, MACD)
-  - Bands (Bollinger %B, ATR)
-  - Trend (EMA stack: 7/21/50/200)
-  - Volume normalization
-  - HMM regime classification
+- `forecast_report.txt` — the report for whichever mode ran.
+- `btc_forecast.png` — 4-panel chart (price path + forecast, training loss,
+  scenario fan chart, target-time distribution). Price mode only.
 
-### 2. Regime Detection (HMM)
-- 3-state Gaussian HMM on returns + volatility
-- Identifies market regimes:
-  - **BULL**: High positive returns, lower volatility
-  - **CHOP**: Neutral regime, moderate vol
-  - **BEAR**: Negative returns, higher volatility
+Sample reports live in `samples/`.
 
-### 3. Ensemble Model
-- **Gradient Boosting Regressor** (scikit-learn):
-  - 100 estimators, learning rate 0.05
-  - Depth 5, predicts average hourly log-return over 24h horizon
-  - Trained on 80% of data with 10% validation holdout
-
-### 4. Uncertainty Quantification
-- **Bootstrap Resampling**: 200 bootstrap samples with fresh models
-- **Conformal Prediction Bands**: 90% coverage guarantees on validation set
-- **Monte Carlo Paths**: 10,000 scenarios (Bull/Base/Bear events)
-
-### 5. Scenario Analysis
-Three market scenarios with event catalysts:
-
-| Scenario | Probability | Shock | Event |
-|----------|------------|-------|-------|
-| BULL | 35% | +4% | ETF approval, macro catalyst |
-| BASE | 40% | 0% | No major catalyst |
-| BEAR | 25% | -6% | Regulatory headwinds |
-
-Each scenario runs 10,000 paths to Sunday 12 AM UTC with:
-- Pre-event drift from model forecast
-- Event shock applied at random time
-- Post-event follow-through volatility
-
-## Forecast Target
-
-**When**: Next Sunday 12:00 AM UTC
-
-The script calculates:
-- Current time in UTC
-- Hours until next Sunday 12:00 AM UTC
-- Forecast index (clamped to 24-hour horizon)
-- Price prediction with uncertainty bands
-
-## Example Output
+## Architecture (price mode)
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│ BITCOIN FORECAST: Next Sunday 12:00 AM UTC            │
-├─────────────────────────────────────────────────────────┤
-│ Current price:        $67,500.00                        │
-│ Mean forecast:        $68,200.00 (+1.04%)               │
-│ 90% Conf. interval:   $66,800.00 - $69,600.00           │
-│ MC Dropout bounds:    $66,200.00 - $70,100.00           │
-│ Regime:               BULL                              │
-└─────────────────────────────────────────────────────────┘
-
-Scenario Analysis Results:
-
-BULL: ETF approval / macro catalyst (prob=35%)
-  Mean: $69,100.00 | Median: $69,050.00
-  P(+5%): 32.1% | P(+10%): 8.5%
-  P(-5%): 2.3%
-
-BASE: No major catalyst (prob=40%)
-  Mean: $68,200.00 | Median: $68,150.00
-  P(+5%): 15.2% | P(+10%): 2.1%
-  P(-5%): 8.7%
-
-BEAR: Regulatory headwinds (prob=25%)
-  Mean: $63,900.00 | Median: $63,850.00
-  P(+5%): 0.5% | P(+10%): 0.0%
-  P(-5%): 62.3%
-
-PROBABILITY-WEIGHTED COMPOSITE:
- Mean: $67,850.00
- P(+5%): 16.2%
- P(+10%): 3.8%
- P(-5%): 21.4%
-```
-
-## Architecture Diagram
-
-```
-┌──────────────────────┐
-│   BTC-USD Data       │  ← yfinance (hourly)
-│   (365+ days)        │
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────┐
-│  Feature Engineering │
-│  - Technical         │  → 10 engineered features
-│  - Volatility        │
-│  - EMAs              │
-└──────────┬───────────┘
-           │
-      ┌────┴─────────────────────┐
-      ▼                          ▼
-┌──────────────┐        ┌──────────────┐
-│ HMM Regime   │        │ Ensemble     │
-│ Detection    │        │ Model        │
-│ (3-state)    │        │ (GB Regr.)   │
-└──────────┬───┘        └──────────┬───┘
-           │                       │
-           ▼                       ▼
-        ┌──────────────────────────┴─────────────────┐
-        │                                            │
-        ▼                                            ▼
-┌────────────────────┐              ┌────────────────────┐
-│  Conformal         │              │  Bootstrap         │
-│  Prediction Bands  │              │  Uncertainty       │
-│  (90% coverage)    │              │  (200 resamples)   │
-└────────────────────┘              └────────────────────┘
+BTC-USD hourly (yfinance)
         │
         ▼
-┌────────────────────────────────────────┐
-│  Monte Carlo Scenario Simulation       │
-│  - BULL scenario: 10,000 paths         │
-│  - BASE scenario: 10,000 paths         │
-│  - BEAR scenario: 10,000 paths         │
-│  Target: Next Sunday 12 AM UTC         │
-└────────────────────────────────────────┘
-        │
+Feature engineering ── log_ret, vol_12h/24h, RSI, MACD, Bollinger, ATR,
+        │              EMA stack, vol_norm, HMM regime
+        ├───────────────► HMM regime detection (3-state BEAR/CHOP/BULL)
         ▼
-┌────────────────────────────────────────┐
-│  Output Report & Visualization         │
-│  - Forecast price + intervals          │
-│  - Scenario probabilities              │
-│  - Price distribution                  │
-│  - 4-panel chart                       │
-└────────────────────────────────────────┘
+CNN-LSTM (Conv1D ×3 → LSTM ×2 → Dense), MC-dropout
+        │   × --runs (averaged)
+        ▼
+Conformal bands (90%) + MC-dropout bounds
+        ▼
+10,000-path BULL/BASE/BEAR scenario Monte Carlo  (shock vol = realized vol_24h)
+        ▼
+Report + 4-panel chart
 ```
+
+## Key files
+
+| File | Purpose |
+|------|---------|
+| `btc_forecast.py` | Full stack: price (CNN-LSTM) + the `--volatility-only` wiring |
+| `volatility.py` | Asset-agnostic vol math: DVOL fetch, RV, EWMA, GARCH(1,1), report |
+| `btc_forecast_lite.py` | Gradient Boosting fallback (no TensorFlow) |
+| `Dockerfile` / `docker-compose.yml` | Python 3.11 + TensorFlow runtime |
 
 ## Requirements
 
-- Python 3.11+
-- Dependencies: numpy, pandas, scikit-learn, scipy, matplotlib, hmmlearn, yfinance, pytz
-- Docker (for containerized execution)
+Python 3.11 (via Docker for the price path). Dependencies in `requirements.txt`:
+numpy, pandas, scikit-learn, scipy, matplotlib, hmmlearn, yfinance, pytz,
+tensorflow, xgboost, requests.
 
-## Customization
+## Known limitations
 
-Edit `btc_forecast.py` to:
-
-- **Change prediction target**: Modify UTC calculation in Section 5
-- **Adjust lookback window**: Change `LOOKBACK_HOURS` (default: 168 = 1 week)
-- **Modify scenarios**: Update `SCENARIOS` dict in Section 6
-- **Adjust model parameters**: Edit `GradientBoostingRegressor` kwargs in Section 3
-
-## Technical Details
-
-### Why Ensemble over Deep Learning?
-
-This implementation uses scikit-learn's Gradient Boosting instead of TensorFlow/Keras because:
-
-1. **Compatibility**: Works with Python 3.14+ (TensorFlow doesn't)
-2. **Speed**: Trains in minutes vs. hours for deep models
-3. **Interpretability**: Feature importance, decision paths
-4. **Data efficiency**: Works well with limited historical data
-5. **Stability**: Less prone to overfitting than RNNs/LSTMs
-
-### Confidence Intervals
-
-Predictions include three uncertainty layers:
-
-1. **Model Uncertainty**: Bootstrap resampling of training data
-2. **Conformal Bands**: 90% guaranteed coverage via validation quantiles
-3. **Scenario Range**: 10th to 90th percentile across 10k simulation paths
-
-## References
-
-- Angeletos, G. M., & Lian, C. (2021). Confidence and the business cycle.
-- Goodfellow, I., Bengio, Y., & Courville, A. (2016). Deep Learning. MIT Press.
-- Hastie, T., Tibshirani, R., & Friedman, J. (2009). Elements of Statistical Learning.
-- Hamilton, J. D. (1989). A new approach to the economic analysis of nonstationary time series.
+- The CNN-LSTM has a **24h training horizon**; longer targets are reached by
+  compounding the predicted hourly rate (an approximation, not a 60h+ model).
+- **No accuracy backtest yet** — the tool reports forecasts but does not yet
+  measure directional hit-rate, MAE, or interval coverage against realized
+  outcomes. Treat outputs as indicative.
+- `OUTPUT_DIR` is `/app/results` (Docker). Running the scripts outside the
+  container requires that path to be writable.
 
 ## License
 
 MIT
-
-## Author
-
-Quantitative Analysis Stack | Bitcoin Price Forecaster
