@@ -39,6 +39,9 @@ parser.add_argument('--target-date', type=str, default=os.getenv('TARGET_DATE'),
                     help='Target date in format YYYY-MM-DD or "next-<day>" (e.g., next-wednesday)')
 parser.add_argument('--target-hour', type=int, default=int(os.getenv('TARGET_HOUR', 0)),
                     help='Target hour in UTC (0-23, default 0 for midnight)')
+parser.add_argument('--runs', type=int, default=int(os.getenv('RUNS', 1)),
+                    help='Number of full train/infer cycles to average (default 1). '
+                         'Each run retrains with a different seed; the forecast is the mean.')
 args = parser.parse_args()
 
 print("=" * 80)
@@ -47,7 +50,8 @@ print("=" * 80)
 
 LOOKBACK_HOURS = 168
 HORIZON_HOURS = 24
-MODEL_EPOCHS = 5
+MODEL_EPOCHS = int(os.getenv('MODEL_EPOCHS', 5))
+N_RUNS = max(1, args.runs)
 VERBOSE = 1
 N_MC = 200
 
@@ -265,34 +269,6 @@ def build_cnn_lstm(seq_len, n_feat, dropout_rate=0.25):
     out = layers.Dense(1)(x)
     return keras.Model(inp, out)
 
-tf.random.set_seed(42)
-np.random.seed(42)
-
-model = build_cnn_lstm(LOOKBACK_HOURS, len(FEATURES))
-model.compile(optimizer=keras.optimizers.Adam(1e-3), loss='huber')
-
-es_cb = keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-lr_cb = keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-5, verbose=0)
-
-hist = model.fit(
-    X_train, y_train,
-    validation_data=(X_val, y_val),
-    epochs=MODEL_EPOCHS,
-    batch_size=32,
-    callbacks=[es_cb, lr_cb],
-    verbose=VERBOSE
-)
-
-test_loss = model.evaluate(X_test, y_test, verbose=0)
-print(f"  Test Loss (scaled): {test_loss:.5f}")
-sys.stdout.flush()
-
-# =====================================================================
-# SECTION 4: Monte Carlo Dropout Inference
-# =====================================================================
-print("\n[4/6] Running Monte Carlo dropout inference (200 passes)...")
-sys.stdout.flush()
-
 N_MC = 200
 
 def mc_predict(model, X, n_samples=N_MC):
@@ -303,20 +279,60 @@ def mc_predict(model, X, n_samples=N_MC):
     preds = model(X_rep, training=True).numpy().reshape(n_samples, -1)
     return preds.mean(axis=0), preds.std(axis=0)
 
-print("  Calibrating conformal prediction bands...")
-# MC-dropout mean over the validation set (same estimator as the live forecast),
-# 50 stochastic passes — matches the original calibration semantics.
-val_preds = np.stack([model(X_val, training=True).numpy().flatten() for _ in range(50)])
-cal_err = np.abs(val_preds.mean(axis=0) - y_val)
-q_hat = np.percentile(cal_err, 90)
+def train_and_infer(run_seed):
+    # One full train -> calibrate -> live-infer cycle. Returns the run's mean
+    # hourly log-return, its MC-dropout std, the conformal quantile, the test
+    # loss, and the training history (for the loss plot).
+    tf.random.set_seed(run_seed)
+    np.random.seed(run_seed)
 
+    model = build_cnn_lstm(LOOKBACK_HOURS, len(FEATURES))
+    model.compile(optimizer=keras.optimizers.Adam(1e-3), loss='huber')
+    es_cb = keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+    lr_cb = keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-5, verbose=0)
+    hist = model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=MODEL_EPOCHS,
+        batch_size=32,
+        callbacks=[es_cb, lr_cb],
+        verbose=VERBOSE
+    )
+    test_loss = model.evaluate(X_test, y_test, verbose=0)
+
+    # Conformal calibration: MC-dropout mean over the validation set (50 passes)
+    val_preds = np.stack([model(X_val, training=True).numpy().flatten() for _ in range(50)])
+    q_hat = np.percentile(np.abs(val_preds.mean(axis=0) - y_val), 90)
+
+    # Live MC-dropout inference for the latest window
+    X_live = X_scaled[-LOOKBACK_HOURS:].reshape(1, LOOKBACK_HOURS, -1)
+    lm, ls = mc_predict(model, X_live, n_samples=N_MC)
+    return float(lm[0]), float(ls[0]), float(q_hat), float(test_loss), hist
+
+# Run the full train/infer cycle N_RUNS times and average the stochastic
+# outputs. Each run uses a distinct seed, so averaging reduces the model-init
+# and MC-sampling variance (what was previously done by hand across runs).
+runs_out = []
+for r in range(N_RUNS):
+    print(f"\n  --- Run {r + 1}/{N_RUNS} (seed {42 + r}) ---")
+    sys.stdout.flush()
+    hr, hs, qh, tl, hist = train_and_infer(42 + r)
+    runs_out.append((hr, hs, qh, tl))
+    print(f"  Run {r + 1}: hourly_ret={hr:+.5f}  std={hs:.5f}  test_loss={tl:.5f}")
+    sys.stdout.flush()
+
+hourly_ret = float(np.mean([o[0] for o in runs_out]))
+hourly_std = float(np.mean([o[1] for o in runs_out]))
+q_hat      = float(np.mean([o[2] for o in runs_out]))
+test_loss  = float(np.mean([o[3] for o in runs_out]))
+
+# =====================================================================
+# SECTION 4: Monte Carlo Dropout Inference (averaged across runs)
+# =====================================================================
+print(f"\n[4/6] MC-dropout inference complete ({N_RUNS} run(s) averaged)")
+print(f"  Avg hourly log-ret: {hourly_ret:+.5f}  |  Avg test loss: {test_loss:.5f}")
 print(f"  Conformal quantile (90% coverage): ±{q_hat*100:.3f}% log-ret")
-
-print("  Running live inference...")
-X_live = X_scaled[-LOOKBACK_HOURS:].reshape(1, LOOKBACK_HOURS, -1)
-live_mean_v, live_std_v = mc_predict(model, X_live, n_samples=N_MC)
-hourly_ret = float(live_mean_v[0])
-hourly_std = float(live_std_v[0])
+sys.stdout.flush()
 
 current_price = float(df['Close'].values[-1])
 
@@ -526,7 +542,8 @@ with open(report_file, 'w') as f:
 
     f.write(f"Generated: {utc_now.strftime('%Y-%m-%d %H:%M:%S UTC')}\n")
     f.write(f"Current Price: ${current_price:.2f}\n")
-    f.write(f"Current Regime: {current_regime}\n\n")
+    f.write(f"Current Regime: {current_regime}\n")
+    f.write(f"Runs averaged: {N_RUNS} (epochs/run: {MODEL_EPOCHS})\n\n")
 
     f.write(f"TARGET: {target_dt.strftime('%A %H:%M UTC (%Y-%m-%d)')}\n")
     f.write(f"Hours until target: {hours_to_target:.1f}\n\n")
