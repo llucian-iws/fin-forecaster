@@ -12,6 +12,8 @@ results/
 *.png
 *.jpg
 *.pdf
+# keep tracked forecast snapshots
+!samples/*.png
 .env
 .env.local
 venv/
