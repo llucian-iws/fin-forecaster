@@ -35,8 +35,13 @@ fallback that runs without TensorFlow if you can't use Docker.
 ### 1. Price forecast (default)
 
 CNN-LSTM predicts the mean hourly log-return over a 24h horizon; that rate is
-compounded to the target. Outputs a point forecast, a 90% conformal band,
-MC-dropout bounds, and probability-weighted BULL/BASE/BEAR scenarios.
+**shrunk toward the random walk** (the walk-forward backtest found the raw drift
+has no 24h edge) and compounded to the target. Inputs include a **funding-rate
+feature** (the one signal with measured directional content — see the backtest).
+Outputs a point forecast, a 90% conformal band, an **asymmetric quantile band**
+from the scenario distribution, and **HMM data-driven regime scenarios** (BULL /
+CHOP / BEAR weighted by the live transition matrix — not hardcoded). The scenario
+Monte-Carlo shock is the **forward-vol model** (GARCH(1,1) ⊕ Deribit DVOL).
 
 | Flag | Env | Default | Meaning |
 |------|-----|---------|---------|
@@ -44,6 +49,7 @@ MC-dropout bounds, and probability-weighted BULL/BASE/BEAR scenarios.
 | `--target-hour` | `TARGET_HOUR` | `0` | Target hour in UTC (0–23) |
 | `--runs N` | `RUNS` | `1` | Retrain N times (distinct seeds) and average the forecast |
 | — | `MODEL_EPOCHS` | `5` | Training epochs per run |
+| — | `SHRINK_ALPHA` | `0.3` | Drift shrinkage toward the random walk (0 = pure RW, 1 = trust the model) |
 
 `--runs` reduces the run-to-run variance from random init + MC sampling by
 averaging the stochastic outputs (hourly return, MC-dropout std, conformal
@@ -92,6 +98,38 @@ horizon forecast (falls back to EWMA if the fit is degenerate), and the
 > a single name degrades to a realized-vol-only report. Index ETFs use the VIX
 > family and work any time.
 
+## Walk-forward backtest (`backtest.py`)
+
+A leak-free walk-forward backtest is the project's success metric: train on an
+expanding window, forecast 24h ahead, compare to the realized outcome, roll
+forward (folds stepped by the horizon, so they're non-overlapping). It compares
+model variants (base TA / +funding / vol-standardized / ensemble / shrunk-to-RW)
+against a random-walk persistence baseline, scores three shock-vol variants with
+**coverage + CRPS + pinball**, and runs a vol-targeted economic eval.
+
+```bash
+docker run --rm -v "$(pwd)/results:/app/results" fin-forecaster:latest \
+  python backtest.py --engine lite --max-folds 150
+```
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--engine` | `lite` | `lite` (GradientBoosting, fast, many folds) or `cnnlstm` (slow) |
+| `--max-folds` | `150` | Number of folds |
+| `--step` | `= horizon` | Hours between folds (e.g. `168` for weekly) |
+| `--horizon` | `24` | Forecast horizon (hours) |
+
+**What it found** (lite, 150 daily folds):
+
+- The **point forecast has no 24h edge** — nothing beats the random-walk MAE and
+  optimal drift shrinkage → 0, so the deployed drift is shrunk toward the RW.
+- **Funding is the one real signal** — it lifts directional hit-rate 47% → 52%.
+- **GARCH+DVOL bands are best-calibrated** on coverage (0.90), CRPS, *and* pinball
+  — which is why they drive the scenario shock.
+
+The honest takeaway: the value is the **calibrated uncertainty band + a slight
+funding tilt**, not point prediction.
+
 ## Output
 
 Written to `results/` (mounted from the host):
@@ -105,21 +143,24 @@ Sample reports live in `samples/`.
 ## Architecture (price mode)
 
 ```
-BTC-USD hourly (yfinance)
+BTC-USD hourly (yfinance)  +  Binance funding rate (exogenous.py)
         │
         ▼
-Feature engineering ── log_ret, vol_12h/24h, RSI, MACD, Bollinger, ATR,
-        │              EMA stack, vol_norm, HMM regime
+Feature engineering ── log_ret, vol_12h/24h, RSI, MACD, Bollinger, ATR, EMA
+        │              stack, vol_norm, HMM regime, funding_z, funding_cum_24h
         ├───────────────► HMM regime detection (3-state BEAR/CHOP/BULL)
         ▼
-CNN-LSTM (Conv1D ×3 → LSTM ×2 → Dense), MC-dropout
-        │   × --runs (averaged)
+CNN-LSTM (Conv1D ×3 → LSTM ×2 → Dense), MC-dropout, × --runs (averaged)
+        ▼
+Drift shrinkage toward the random walk  (SHRINK_ALPHA; backtest: no 24h edge)
         ▼
 Conformal bands (90%) + MC-dropout bounds
         ▼
-10,000-path BULL/BASE/BEAR scenario Monte Carlo  (shock vol = forward model: GARCH(1,1) ⊕ DVOL, falls back to realized vol_24h)
+10,000-path scenario Monte Carlo
+   ├─ HMM data-driven regime scenarios (transition-matrix weights)
+   └─ shock vol = forward model: GARCH(1,1) ⊕ DVOL (falls back to realized vol_24h)
         ▼
-Report + 4-panel chart
+Asymmetric quantile band  +  Report + 4-panel chart
 ```
 
 ## Key files
@@ -128,6 +169,10 @@ Report + 4-panel chart
 |------|---------|
 | `btc_forecast.py` | Full stack: price (CNN-LSTM) + the `--volatility-only` wiring |
 | `volatility.py` | Asset-agnostic vol math: DVOL fetch, RV, EWMA, GARCH(1,1), report |
+| `exogenous.py` | Keyless Binance funding/OI/basis fetchers + funding features |
+| `forecast_post.py` | Shrinkage, bias correction, HMM regime scenarios, quantile bands, ensemble |
+| `metrics.py` | CRPS, pinball, coverage, economic strategy eval |
+| `backtest.py` | Leak-free walk-forward backtest (`lite` + `cnnlstm` engines) |
 | `btc_forecast_lite.py` | Gradient Boosting fallback (no TensorFlow) |
 | `Dockerfile` / `docker-compose.yml` | Python 3.11 + TensorFlow runtime |
 
@@ -141,9 +186,11 @@ tensorflow, xgboost, requests.
 
 - The CNN-LSTM has a **24h training horizon**; longer targets are reached by
   compounding the predicted hourly rate (an approximation, not a 60h+ model).
-- **No accuracy backtest yet** — the tool reports forecasts but does not yet
-  measure directional hit-rate, MAE, or interval coverage against realized
-  outcomes. Treat outputs as indicative.
+- **The point forecast has no measured 24h directional edge.** The walk-forward
+  backtest shows it does not beat a random walk on MAE — which is why the drift
+  is shrunk toward the RW and the point lands ≈spot. Funding adds a slight tilt
+  (52% hit-rate); the real value is the calibrated uncertainty band. Don't read
+  the point as a directional call.
 - `OUTPUT_DIR` is `/app/results` (Docker). Running the scripts outside the
   container requires that path to be writable.
 

@@ -71,14 +71,24 @@ Quant forecasting stack for **price** and **volatility**, crypto + stocks. See
 
 ## Layout
 - `btc_forecast.py` — full stack: CNN-LSTM + HMM + MC-dropout + conformal +
-  10k-path scenario Monte Carlo, plus the `--volatility-only` branch. The
-  scenario-MC shock vol is the **forward vol model** (GARCH(1,1) ⊕ Deribit
-  DVOL), falling back to trailing realized vol_24h.
+  10k-path scenario Monte Carlo, plus the `--volatility-only` branch. Includes
+  the funding feature, drift **shrinkage** toward the random walk (`SHRINK_ALPHA`),
+  **HMM data-driven regime scenarios** (replaces the old hardcoded 35/40/25), an
+  **asymmetric quantile band**, and the **forward-vol shock** (GARCH(1,1) ⊕ DVOL).
 - `volatility.py` — asset-agnostic vol math (numpy/pandas/requests only, **no
   TensorFlow**): Deribit DVOL fetch, realized vol, EWMA, GARCH(1,1), report.
+- `exogenous.py` — keyless Binance funding-rate / OI / basis fetchers +
+  look-ahead-free funding feature builder. (Funding history is deep; OI ~30d
+  only; basis is a live snapshot — so only **funding** is backtestable.)
+- `forecast_post.py` — pure post-processing: drift shrinkage, bias correction,
+  HMM regime scenarios, empirical quantile bands, inverse-error ensemble.
+- `metrics.py` — CRPS (ensemble + Gaussian), pinball, coverage, economic
+  (vol-targeted long/short) strategy eval.
 - `btc_forecast_lite.py` — Gradient Boosting fallback (no TensorFlow).
-- `backtest.py` — walk-forward backtest (hit-rate, MAE vs persistence, 90%
-  interval coverage per shock variant); engines `lite` (GB) and `cnnlstm`.
+- `backtest.py` — walk-forward backtest: compares model variants (base /
+  +funding / vol-standardized / ensemble / shrunk) vs persistence on hit-rate &
+  MAE, scores shock variants with coverage + **CRPS + pinball**, and runs an
+  economic eval. Engines `lite` (GB, fast) and `cnnlstm` (slow).
 - `Dockerfile` / `docker-compose.yml` — Python 3.11 + TensorFlow runtime.
 
 ## How it runs
@@ -94,8 +104,10 @@ Quant forecasting stack for **price** and **volatility**, crypto + stocks. See
 ## Flags / env
 `--target-date`/`TARGET_DATE` (`YYYY-MM-DD` or `next-<weekday>`),
 `--target-hour`/`TARGET_HOUR`, `--runs`/`RUNS` (average N retrains, distinct
-seeds), `MODEL_EPOCHS` (default 5), `--volatility-only`/`VOLATILITY_ONLY`,
-`--asset`/`ASSET` (`crypto|stock`), `--ticker`/`TICKER`.
+seeds), `MODEL_EPOCHS` (default 5), `SHRINK_ALPHA` (drift shrinkage toward RW,
+default 0.3), `--volatility-only`/`VOLATILITY_ONLY`, `--asset`/`ASSET`
+(`crypto|stock`), `--ticker`/`TICKER`.
+`backtest.py`: `--engine lite|cnnlstm`, `--max-folds`, `--step`, `--horizon`.
 
 ## Gotchas (learned the hard way)
 - **`--runs` must vary the seed per run** — a fixed seed makes averaging a no-op.
@@ -121,3 +133,13 @@ seeds), `MODEL_EPOCHS` (default 5), `--volatility-only`/`VOLATILITY_ONLY`,
   steps (150 folds); cnnlstm was run with `--step 168` (20 weekly folds). Their
   persistence baselines differ because the samples differ — match `--step`/
   `--max-folds` before comparing engines head-to-head.
+- **Funding is the one signal with real directional content** — it lifts the
+  24h hit-rate 47%→52% in the backtest (still no MAE edge). That's why the live
+  drift is shrunk toward the random walk (`SHRINK_ALPHA`, backtest α→0) and the
+  point forecast lands ≈spot. The product's value is the calibrated asymmetric
+  band + a slight funding tilt, NOT the point. **Bias-correction was measured to
+  HURT** at 24h (noise, not stable bias) — it's in `forecast_post.py` but is
+  deliberately NOT applied in production.
+- **Only funding is backtestable among the exogenous feeds.** Binance OI history
+  is ~30d and basis is a live snapshot, so they're live-only; don't try to use
+  them as walk-forward features.
