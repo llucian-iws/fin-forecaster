@@ -1,0 +1,56 @@
+======================================================================
+BITCOIN PRICE FORECAST REPORT - CNN-LSTM + HMM + Monte Carlo
+======================================================================
+
+Generated: 2026-06-09 10:20:16 UTC
+Current Price: $63062.97
+Current Regime: CHOP
+Runs averaged: 3 (epochs/run: 5)
+
+TARGET: Wednesday 12:00 UTC (2026-06-10)
+Hours until target: 26.5
+
+FORECAST (CNN-LSTM + MC Dropout):
+  Mean price:         $63056.10 (-0.01%)
+  Drift:              raw -0.00002/hr -> shrunk x0.3 = -0.00000/hr (backtest: drift has no 24h edge)
+  90% CI:             $60029.25 - $66235.58
+  MC range (2σ):      $62802.65 - $63310.59
+
+VOLATILITY MODEL (scenario shock input):
+  Shock vol used:     0.485%/hr (45.4% ann)
+  Implied (DVOL):     44.9% ann
+  Forward [GARCH(1,1)]: 45.9% ann
+  Trailing realized:  37.8% ann
+  IV - forecast RV:   -1.0 vol pts
+
+SCENARIO ANALYSIS (10,000 paths each):
+
+  CHOP regime (95%)
+    Probability: 95%
+    Mean: $63120.45 | Median: $63094.39
+    P10-P90: $61126.32 - $65159.01
+    P(+5%): 2.6% | P(+10%): 0.0%
+    P(-5%): 1.9%
+
+  BEAR regime (3%)
+    Probability: 3%
+    Mean: $59375.40 | Median: $59357.33
+    P10-P90: $57503.72 - $61281.24
+    P(+5%): 0.0% | P(+10%): 0.0%
+    P(-5%): 64.2%
+
+  BULL regime (2%)
+    Probability: 2%
+    Mean: $66426.44 | Median: $66410.31
+    P10-P90: $64354.60 - $68518.15
+    P(+5%): 54.9% | P(+10%): 3.6%
+    P(-5%): 0.0%
+
+
+PROBABILITY-WEIGHTED COMPOSITE:
+  Mean: $63080.29
+  Asymmetric 90% band: $60638.66 - $65584.27
+  Median: $63055.99  (P25 $62073.95 / P75 $64080.43)
+  P(+5%): 1.9%
+  P(+10%): 0.0%
+  P(-5%): 1.6%
