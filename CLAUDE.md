@@ -71,10 +71,14 @@ Quant forecasting stack for **price** and **volatility**, crypto + stocks. See
 
 ## Layout
 - `btc_forecast.py` — full stack: CNN-LSTM + HMM + MC-dropout + conformal +
-  10k-path scenario Monte Carlo, plus the `--volatility-only` branch.
+  10k-path scenario Monte Carlo, plus the `--volatility-only` branch. The
+  scenario-MC shock vol is the **forward vol model** (GARCH(1,1) ⊕ Deribit
+  DVOL), falling back to trailing realized vol_24h.
 - `volatility.py` — asset-agnostic vol math (numpy/pandas/requests only, **no
   TensorFlow**): Deribit DVOL fetch, realized vol, EWMA, GARCH(1,1), report.
 - `btc_forecast_lite.py` — Gradient Boosting fallback (no TensorFlow).
+- `backtest.py` — walk-forward backtest (hit-rate, MAE vs persistence, 90%
+  interval coverage per shock variant); engines `lite` (GB) and `cnnlstm`.
 - `Dockerfile` / `docker-compose.yml` — Python 3.11 + TensorFlow runtime.
 
 ## How it runs
@@ -102,5 +106,11 @@ seeds), `MODEL_EPOCHS` (default 5), `--volatility-only`/`VOLATILITY_ONLY`,
 - **Single-name option-chain IV only works during US market hours** (Yahoo IV is
   stale after-hours); it's gated via pytz and degrades to realized-vol-only.
 - The model has a **24h horizon**; longer targets compound the hourly rate.
-- **No accuracy backtest exists yet** — don't claim accuracy gains without one
-  (walk-forward + interval coverage is the missing success metric).
+- **The point forecast has no directional edge at 24h.** The `backtest.py`
+  walk-forward (lite, 150 folds) gives a 47% hit-rate and does *not* beat a
+  random-walk persistence baseline on MAE. Don't sell the point forecast as
+  predictive — its value is the scenario distribution, not the direction.
+- **The forward-vol integration is what the backtest validates.** Pre-integration
+  realized-vol bands under-cover (0.86 at nominal 0.90 — overconfident); the
+  GARCH and GARCH+DVOL forward shocks land at ~0.92, i.e. better calibrated.
+  Re-run `backtest.py` before claiming any future calibration change.
