@@ -69,29 +69,31 @@ def lite_rate(feat_train, y_train, feat_now):
     return float(model.predict(scaler.transform(feat_now.reshape(1, -1)))[0])
 
 
-def cnn_rate(feat_block, y_block, window, epochs):
-    """Train a compact Conv1D/LSTM on the past window-sequences and predict the
-    rate from the most recent window. feat_block/y_block already exclude the
-    leaking tail; the last `window` rows of feat_block form the inference seq."""
+def cnn_rate(feat_all, tgt_all, t, h, window, epochs):
+    """Train a compact Conv1D/LSTM and predict the rate at fold time t.
+
+    Training sequences use only targets realized by t (rows < t-h+1); the scaler
+    is fit on that training region only. Inference uses the window ENDING at t
+    (features up to t are known at the fold), matching the lite engine."""
     import tensorflow as tf
     from tensorflow import keras
     from tensorflow.keras import layers
 
     tf.random.set_seed(42)
     np.random.seed(42)
-    scaler = RobustScaler().fit(feat_block[:-window])
-    fs = scaler.transform(feat_block)
+    train_end = t - h + 1                          # exclusive; targets realized by t
+    scaler = RobustScaler().fit(feat_all[:train_end])
+    fs = scaler.transform(feat_all[:t + 1])        # features up to fold time t
 
-    # Supervised sequences: rows [i-window : i] -> y at i (only where y is set).
-    n_train = len(y_block)
+    # Supervised sequences: rows [i-window : i] -> mean-hourly-return target at i.
     X, Y = [], []
-    for i in range(window, n_train):
+    for i in range(window, train_end):
         X.append(fs[i - window:i])
-        Y.append(y_block[i])
+        Y.append(tgt_all[i])
     X, Y = np.asarray(X), np.asarray(Y)
 
     model = keras.Sequential([
-        layers.Input((window, feat_block.shape[1])),
+        layers.Input((window, feat_all.shape[1])),
         layers.Conv1D(32, 3, activation='relu', padding='causal'),
         layers.Conv1D(32, 3, activation='relu', padding='causal'),
         layers.LSTM(32),
@@ -102,7 +104,7 @@ def cnn_rate(feat_block, y_block, window, epochs):
     model.compile(optimizer='adam', loss='mse')
     model.fit(X, Y, epochs=epochs, batch_size=64, verbose=0)
 
-    infer_seq = fs[-window:][None, :, :]
+    infer_seq = fs[t - window + 1:t + 1][None, :, :]
     return float(model.predict(infer_seq, verbose=0)[0, 0])
 
 
@@ -128,12 +130,15 @@ def main():
     ap = argparse.ArgumentParser(description='Walk-forward backtest')
     ap.add_argument('--engine', choices=['lite', 'cnnlstm'], default='lite')
     ap.add_argument('--horizon', type=int, default=24, help='forecast horizon (hours)')
+    ap.add_argument('--step', type=int, default=None,
+                    help='hours between folds (default = horizon, i.e. non-overlapping daily)')
     ap.add_argument('--max-folds', type=int, default=150)
     ap.add_argument('--min-train', type=int, default=2000, help='min rows before first fold')
     ap.add_argument('--window', type=int, default=168, help='cnnlstm sequence length')
     ap.add_argument('--epochs', type=int, default=3, help='cnnlstm epochs/fold')
     args = ap.parse_args()
-    h, step = args.horizon, args.horizon
+    h = args.horizon
+    step = args.step or h
 
     print("=" * 80)
     print(f"WALK-FORWARD BACKTEST  | engine={args.engine}  horizon={h}h")
@@ -189,7 +194,7 @@ def main():
         if args.engine == 'lite':
             rate = lite_rate(ft, yt, feat[t])
         else:
-            rate = cnn_rate(feat[:last][mask], yt, args.window, args.epochs)
+            rate = cnn_rate(feat, tgt, t, h, args.window, args.epochs)
 
         point = close[t] * np.exp(rate * h)
         actual = close[t + h]

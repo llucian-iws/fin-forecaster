@@ -106,11 +106,18 @@ seeds), `MODEL_EPOCHS` (default 5), `--volatility-only`/`VOLATILITY_ONLY`,
 - **Single-name option-chain IV only works during US market hours** (Yahoo IV is
   stale after-hours); it's gated via pytz and degrades to realized-vol-only.
 - The model has a **24h horizon**; longer targets compound the hourly rate.
-- **The point forecast has no directional edge at 24h.** The `backtest.py`
-  walk-forward (lite, 150 folds) gives a 47% hit-rate and does *not* beat a
-  random-walk persistence baseline on MAE. Don't sell the point forecast as
-  predictive — its value is the scenario distribution, not the direction.
-- **The forward-vol integration is what the backtest validates.** Pre-integration
-  realized-vol bands under-cover (0.86 at nominal 0.90 — overconfident); the
-  GARCH and GARCH+DVOL forward shocks land at ~0.92, i.e. better calibrated.
-  Re-run `backtest.py` before claiming any future calibration change.
+- **Neither engine beats a random-walk on the 24h point forecast.** In
+  `backtest.py`, both lite and cnnlstm lose to a persistence baseline on MAE.
+  Directional hit-rate is sample-dependent and NOT a reliable edge (lite 47%
+  over 150 daily folds; cnnlstm 60% over only 20 weekly folds — different fold
+  sets, so not comparable, and 20 folds is noisy). Don't sell the point
+  forecast as predictive — its value is the scenario distribution, not direction.
+- **The forward-vol integration is what the backtest validates**, and both
+  engines agree. Pre-integration realized-vol bands under-cover (lite 0.86,
+  cnnlstm 0.75 at nominal 0.90 — overconfident); the GARCH+DVOL forward shock
+  is best-calibrated (lite 0.93, cnnlstm 0.90 exact). Re-run `backtest.py`
+  before claiming any future calibration change.
+- **Cross-engine comparisons need the SAME folds.** Lite defaults to daily
+  steps (150 folds); cnnlstm was run with `--step 168` (20 weekly folds). Their
+  persistence baselines differ because the samples differ — match `--step`/
+  `--max-folds` before comparing engines head-to-head.
