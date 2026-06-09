@@ -35,13 +35,19 @@ from sklearn.preprocessing import RobustScaler
 from sklearn.ensemble import GradientBoostingRegressor
 
 import volatility
+import forecast_post as fp
+import metrics as mx
+from exogenous import fetch_funding, funding_features
 
 OUTPUT_DIR = Path(os.getenv('OUTPUT_DIR', '/app/results'))
 OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
 
 Z90 = 1.6448536269514722          # two-sided 90% (0.05 per tail)
 ANN_HOURLY = np.sqrt(24 * 365)    # hourly -> annualized vol factor
-FEATURES = ['log_ret', 'vol', 'rsi', 'ema_stack']
+N_MC = 4000                       # MC draws per fold for CRPS / quantile bands
+BASE_FEATURES = ['log_ret', 'vol', 'rsi', 'ema_stack']
+FUND_FEATURES = BASE_FEATURES + ['funding_z', 'funding_cum_24h']
+FEATURES = BASE_FEATURES          # cnn engine uses the base TA features
 
 
 def build_features(df):
@@ -164,11 +170,23 @@ def main():
     else:
         print("  DVOL history: unavailable (garch+dvol variant falls back to garch)")
 
+    # --- Exogenous: funding-rate features (look-ahead-free, ffilled to hourly)
+    print("  Fetching Binance funding-rate history...")
+    fund_df = fetch_funding('BTCUSDT', days=700)
+    ff = funding_features(fund_df, df.index).fillna(0.0)
+    for c in ('funding_z', 'funding_cum_24h', 'funding_rate'):
+        df[c] = ff[c].values
+    funding_ok = fund_df is not None and len(fund_df) > 0
+    print("  Funding: " + (f"OK, {len(fund_df)} prints "
+          f"({fund_df['ts'].iloc[0].date()} -> {fund_df['ts'].iloc[-1].date()})"
+          if funding_ok else "unavailable -> zero-filled (no exogenous signal)"))
+
     close = df['Close'].values
     logc = np.log(close)
     log_ret = df['log_ret'].values
-    realized_h = df['vol'].values          # trailing vol_24h (hourly std)
-    feat = df[FEATURES].values
+    realized_h = df['vol'].values                 # trailing vol_24h (hourly std)
+    base_mat = df[BASE_FEATURES].values
+    fund_mat = df[FUND_FEATURES].values
     # Target: mean hourly log-return over the next h hours.
     tgt = np.full(n, np.nan)
     tgt[:n - h] = (logc[h:] - logc[:n - h]) / h
@@ -177,29 +195,56 @@ def main():
     t_end = n - 1 - h
     t_start = max(args.min_train, t_end - (args.max_folds - 1) * step)
     folds = list(range(t_start, t_end + 1, step))
+    ann_factor = (24 * 365) / step                # folds per year, for Sharpe
     print(f"\n[2/3] Running {len(folds)} folds "
           f"({df.index[folds[0]].date()} -> {df.index[folds[-1]].date()}, step {step}h)...")
 
+    rng = np.random.default_rng(12345)
     rows = []
     dvol_hits = 0
+    # Strictly-prior accumulators for OUT-OF-SAMPLE post-processing (no leak).
+    hist_rate, hist_realized, hist_err = [], [], []   # base rate vs realized tgt
+    pt_err = {'base': [], 'fund': []}                 # point abs-errors -> ensemble weights
+    lite = args.engine == 'lite'
     for fi, t in enumerate(folds):
-        # Train only on rows whose full h-ahead target is realized by t.
-        last = t - h + 1                       # exclusive end for training
-        ft, yt = feat[:last], tgt[:last]
-        mask = ~np.isnan(yt)
-        ft, yt = ft[mask], yt[mask]
-        if len(yt) < args.min_train:
+        last = t - h + 1                              # train on rows whose target is realized by t
+        if last < args.min_train:
             continue
+        ytr = tgt[:last]
 
-        if args.engine == 'lite':
-            rate = lite_rate(ft, yt, feat[t])
+        # --- model variants ---------------------------------------------
+        if lite:
+            rate_base = lite_rate(base_mat[:last], ytr, base_mat[t])
+            rate_fund = lite_rate(fund_mat[:last], ytr, fund_mat[t])
+            # vol-standardized target (#6): regress tgt/vol, rescale by current vol
+            vstd = ytr / np.where(realized_h[:last] > 0, realized_h[:last], np.nan)
+            m2 = ~np.isnan(vstd)
+            rate_vstd = (lite_rate(base_mat[:last][m2], vstd[m2], base_mat[t]) * realized_h[t]
+                         if int(m2.sum()) >= args.min_train else rate_base)
         else:
-            rate = cnn_rate(feat, tgt, t, h, args.window, args.epochs)
+            rate_base = cnn_rate(base_mat, tgt, t, h, args.window, args.epochs)
+            rate_fund = rate_vstd = rate_base        # cnn engine stays on base features
 
-        point = close[t] * np.exp(rate * h)
-        actual = close[t + h]
+        # ensemble of base+funding, weighted by trailing OOS point-MAE (#7)
+        mae_b = float(np.mean(pt_err['base'])) if pt_err['base'] else None
+        mae_f = float(np.mean(pt_err['fund'])) if pt_err['fund'] else None
+        rate_ens = fp.ensemble_combine({'base': rate_base, 'fund': rate_fund},
+                                       {'base': mae_b, 'fund': mae_f})
 
-        # Three shock-vol variants (hourly std), shared point forecast.
+        # shrink drift toward random walk + subtract trailing bias, both OOS (#1)
+        alpha = fp.fit_shrinkage(hist_rate, hist_realized)
+        bias_r = fp.rolling_bias_correction(hist_err, window=30)
+        rate_adj = fp.apply_shrinkage(rate_base, alpha) - bias_r
+
+        cur, actual = close[t], close[t + h]
+        rates = {'base': rate_base, 'fund': rate_fund, 'volstd': rate_vstd,
+                 'ens': rate_ens, 'adj': rate_adj, 'persist': 0.0}
+        rec = {'t': df.index[t], 'cur': cur, 'actual': actual,
+               'alpha': alpha, 'bias_r': bias_r, 'vol_h': realized_h[t] * np.sqrt(h)}
+        for k, r in rates.items():
+            rec[f'pt_{k}'] = cur * np.exp(r * h)
+
+        # --- shock-vol variants -> calibrated distribution around the adj point
         sig_real = realized_h[t]
         gf = volatility.garch11_forecast(pd.Series(log_ret[:t + 1]), horizon=h, ann=ANN_HOURLY)
         sig_garch = (gf / ANN_HOURLY) if gf is not None else sig_real
@@ -210,18 +255,25 @@ def main():
                 dv = float(past.iloc[-1])
         if dv is not None:
             dvol_hits += 1
-            sig_dvol = np.mean([sig_garch, (dv / 100.0) / ANN_HOURLY])
+            sig_dvol = float(np.mean([sig_garch, (dv / 100.0) / ANN_HOURLY]))
         else:
             sig_dvol = sig_garch
 
-        rec = {'t': df.index[t], 'cur': close[t], 'point': point, 'actual': actual,
-               'rate': rate}
-        for tag, sig in [('real', sig_real), ('garch', sig_garch), ('dvol', sig_dvol)]:
-            band = Z90 * sig * np.sqrt(h)
-            lo, hi = point * np.exp(-band), point * np.exp(band)
-            rec[f'cov_{tag}'] = int(lo <= actual <= hi)
-            rec[f'wid_{tag}'] = (hi - lo) / point
+        p_adj = rec['pt_adj']
+        for tag, sig in (('real', sig_real), ('garch', sig_garch), ('dvol', sig_dvol)):
+            sd = max(float(sig), 1e-9) * np.sqrt(h)
+            draws = p_adj * np.exp(rng.normal(0.0, sd, N_MC))
+            band = fp.empirical_quantile_band(draws, (0.05, 0.25, 0.5, 0.75, 0.95))
+            rec[f'cov_{tag}'] = mx.interval_coverage(band[0.05], band[0.95], actual)
+            rec[f'crps_{tag}'] = mx.crps_ensemble(draws, actual)
+            rec[f'pin_{tag}'] = mx.pinball_loss(band, actual)
+            rec[f'wid_{tag}'] = (band[0.95] - band[0.05]) / p_adj
         rows.append(rec)
+
+        # advance strictly-prior accumulators AFTER use
+        hist_rate.append(rate_base); hist_realized.append(tgt[t]); hist_err.append(rate_base - tgt[t])
+        pt_err['base'].append(abs(rec['pt_base'] - actual))
+        pt_err['fund'].append(abs(rec['pt_fund'] - actual))
         if (fi + 1) % 25 == 0:
             print(f"    {fi + 1}/{len(folds)} folds...")
 
@@ -229,41 +281,69 @@ def main():
     print(f"  Completed {len(R)} folds.")
 
     # ---- Metrics --------------------------------------------------------
-    cur, point, actual = R['cur'].values, R['point'].values, R['actual'].values
-    dir_correct = np.sign(point - cur) == np.sign(actual - cur)
-    hit_rate = dir_correct.mean()
-    mae, mape = np.abs(point - actual).mean(), np.abs(point / actual - 1).mean()
-    bias = (point / actual - 1).mean()
-    rw_mae, rw_mape = np.abs(cur - actual).mean(), np.abs(cur / actual - 1).mean()
+    cur = R['cur'].values
+    actual = R['actual'].values
+    rw_mae = float(np.abs(cur - actual).mean())
+    rw_mape = float(np.abs(cur / actual - 1).mean())
+
+    def pstats(tag):
+        p = R[f'pt_{tag}'].values
+        hit = float((np.sign(p - cur) == np.sign(actual - cur)).mean())
+        return hit, float(np.abs(p - actual).mean()), float(np.abs(p / actual - 1).mean())
+
+    drift_adj = np.log(R['pt_adj'].values / cur)          # predicted total log-ret over horizon
+    realized_ret = np.log(actual / cur)
+    strat = mx.strategy_eval(drift_adj, realized_ret, R['vol_h'].values,
+                             fee_bps=5.0, ann_factor=ann_factor)
+
+    models = [('base', 'base (TA only)    '), ('adj', 'shrunk+debiased   ')]
+    if lite:
+        models = [('base', 'base (TA only)    '), ('fund', '+ funding         '),
+                  ('volstd', 'vol-standardized  '), ('ens', 'ensemble(base+fnd)'),
+                  ('adj', 'shrunk+debiased   ')]
 
     print("\n[3/3] Results")
-    lines = []
-    lines.append("=" * 70)
-    lines.append(f"WALK-FORWARD BACKTEST  (engine={args.engine}, horizon={h}h)")
-    lines.append("=" * 70)
-    lines.append(f"Generated:  {datetime.datetime.utcnow():%Y-%m-%d %H:%M:%S} UTC")
-    lines.append(f"Folds:      {len(R)} non-overlapping "
-                 f"({R['t'].iloc[0]:%Y-%m-%d} -> {R['t'].iloc[-1]:%Y-%m-%d})")
-    lines.append("")
-    lines.append("POINT FORECAST")
-    lines.append(f"  Directional hit-rate:  {hit_rate*100:5.1f}%   (coin-flip 50.0%)")
-    lines.append(f"  MAE:                   ${mae:>10,.2f}   (persistence ${rw_mae:,.2f})")
-    lines.append(f"  MAPE:                  {mape*100:5.2f}%   (persistence {rw_mape*100:.2f}%)")
-    lines.append(f"  Bias (mean % error):   {bias*100:+5.2f}%")
-    beats = "YES" if mae < rw_mae else "NO"
-    lines.append(f"  Beats persistence MAE: {beats}")
-    lines.append("")
-    lines.append("INTERVAL COVERAGE @ 90%  (nominal 0.90; closer = better calibrated)")
-    for tag, label in [('real', 'realized vol_24h '), ('garch', 'GARCH forward    '),
-                       ('dvol', 'GARCH+DVOL       ')]:
-        cov = R[f'cov_{tag}'].mean()
-        wid = R[f'wid_{tag}'].mean()
-        lines.append(f"  {label}: {cov:0.3f}   mean width +/-{wid/2*100:4.1f}%")
+    L = []
+    L.append("=" * 74)
+    L.append(f"WALK-FORWARD BACKTEST  (engine={args.engine}, horizon={h}h)")
+    L.append("=" * 74)
+    L.append(f"Generated:  {datetime.datetime.utcnow():%Y-%m-%d %H:%M:%S} UTC")
+    L.append(f"Folds:      {len(R)} non-overlapping "
+             f"({R['t'].iloc[0]:%Y-%m-%d} -> {R['t'].iloc[-1]:%Y-%m-%d}, step {step}h)")
+    L.append(f"Funding:    {'on' if funding_ok else 'unavailable (zero-filled)'}")
+    L.append("")
+    L.append("POINT FORECAST            hit%      MAE         MAPE")
+    for tag, label in models:
+        hit, mae, mape = pstats(tag)
+        L.append(f"  {label}    {hit*100:5.1f}   ${mae:>9,.2f}   {mape*100:5.2f}%")
+    L.append(f"  persistence (RW)           --   ${rw_mae:>9,.2f}   {rw_mape*100:5.2f}%")
+    adj_mae = pstats('adj')[1]
+    L.append(f"  -> shrunk+debiased beats persistence MAE: "
+             f"{'YES' if adj_mae < rw_mae else 'NO'}  (final alpha~{R['alpha'].iloc[-1]:.2f})")
+    L.append("")
+    L.append("DISTRIBUTION around shrunk point   coverage    CRPS      pinball   width")
+    best_crps, best_tag = None, None
+    for tag, label in (('real', 'realized vol_24h'), ('garch', 'GARCH forward  '),
+                       ('dvol', 'GARCH+DVOL     ')):
+        cov = float(R[f'cov_{tag}'].mean())
+        crps = float(R[f'crps_{tag}'].mean())
+        pin = float(R[f'pin_{tag}'].mean())
+        wid = float(R[f'wid_{tag}'].mean())
+        L.append(f"  {label}    {cov:6.3f}   ${crps:>8,.2f}   ${pin:>7,.2f}   +/-{wid/2*100:4.1f}%")
+        if best_crps is None or crps < best_crps:
+            best_crps, best_tag = crps, label.strip()
+    L.append(f"  -> best CRPS (calibration+sharpness): {best_tag}")
     if dvol is not None:
-        lines.append(f"  (DVOL available for {dvol_hits}/{len(R)} folds; "
-                     f"rest fall back to GARCH)")
-    lines.append("=" * 70)
-    report = "\n".join(lines)
+        L.append(f"  (DVOL present for {dvol_hits}/{len(R)} folds)")
+    L.append("")
+    L.append("ECONOMIC  (vol-targeted long/short on shrunk drift, 5bps fee)")
+    L.append(f"  Sharpe (annualized):   {strat['sharpe']:+.2f}")
+    L.append(f"  Total return (log):    {strat['total_return']*100:+.1f}%")
+    L.append(f"  Max drawdown:          {strat['max_drawdown']*100:.1f}%")
+    L.append(f"  Trade hit-rate:        {strat['hit_rate']*100:.1f}%   "
+             f"avg|pos| {strat['avg_abs_position']:.2f}")
+    L.append("=" * 74)
+    report = "\n".join(L)
     print("\n" + report)
 
     (OUTPUT_DIR / 'backtest_report.txt').write_text(report + "\n")

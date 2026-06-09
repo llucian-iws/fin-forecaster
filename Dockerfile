@@ -21,6 +21,9 @@ COPY btc_forecast.py .
 COPY btc_forecast_lite.py .
 COPY volatility.py .
 COPY backtest.py .
+COPY exogenous.py .
+COPY forecast_post.py .
+COPY metrics.py .
 
 # Create results directory with proper permissions for volume mount
 RUN mkdir -p /app/results && chmod 777 /app/results

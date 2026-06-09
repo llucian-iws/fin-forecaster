@@ -20,6 +20,7 @@ from sklearn.preprocessing import RobustScaler, MinMaxScaler
 from sklearn.model_selection import TimeSeriesSplit
 from scipy.stats import norm
 from hmmlearn.hmm import GaussianHMM
+import forecast_post as fp          # shrinkage / regime scenarios / quantile bands
 # NOTE: tensorflow/keras are imported lazily in Section 3 (price path only) so
 # the --volatility-only path never loads TensorFlow.
 import datetime
@@ -353,6 +354,17 @@ FEATURES = [
 df['hmm_num'] = df['hmm_regime'].map({'BEAR': 0, 'CHOP': 1, 'BULL': 2})
 FEATURES.append('hmm_num')
 
+# Exogenous funding-rate features. The walk-forward backtest showed funding lifts
+# the 24h directional hit-rate 47%->52% (the one signal with real directional
+# content). Look-ahead-free; degrades to zeros if Binance is unreachable.
+import exogenous
+_fund_df = exogenous.fetch_funding('BTCUSDT', days=730)
+_fund_feat = exogenous.funding_features(_fund_df, df.index).fillna(0.0)
+df['funding_z'] = _fund_feat['funding_z'].values
+df['funding_cum_24h'] = _fund_feat['funding_cum_24h'].values
+print(f"  Funding feature: {'OK' if (_fund_df is not None and len(_fund_df)) else 'unavailable -> zeros'}")
+FEATURES += ['funding_z', 'funding_cum_24h']
+
 df_model = df[FEATURES + ['Close']].dropna().copy()
 
 # Scaling
@@ -451,7 +463,12 @@ for r in range(N_RUNS):
     print(f"  Run {r + 1}: hourly_ret={hr:+.5f}  std={hs:.5f}  test_loss={tl:.5f}")
     sys.stdout.flush()
 
-hourly_ret = float(np.mean([o[0] for o in runs_out]))
+# Shrink the model drift toward the random walk. The walk-forward backtest found
+# the 24h drift has no edge over persistence (optimal shrinkage alpha -> 0), so
+# the deployed point forecast trusts the drift only partially (default 0.3).
+hourly_ret_raw = float(np.mean([o[0] for o in runs_out]))
+SHRINK_ALPHA = float(os.getenv('SHRINK_ALPHA', '0.3'))
+hourly_ret = fp.apply_shrinkage(hourly_ret_raw, SHRINK_ALPHA)
 hourly_std = float(np.mean([o[1] for o in runs_out]))
 q_hat      = float(np.mean([o[2] for o in runs_out]))
 test_loss  = float(np.mean([o[3] for o in runs_out]))
@@ -460,7 +477,8 @@ test_loss  = float(np.mean([o[3] for o in runs_out]))
 # SECTION 4: Monte Carlo Dropout Inference (averaged across runs)
 # =====================================================================
 print(f"\n[4/6] MC-dropout inference complete ({N_RUNS} run(s) averaged)")
-print(f"  Avg hourly log-ret: {hourly_ret:+.5f}  |  Avg test loss: {test_loss:.5f}")
+print(f"  Hourly log-ret: raw {hourly_ret_raw:+.5f} -> shrunk x{SHRINK_ALPHA} = {hourly_ret:+.5f}"
+      f"  |  Avg test loss: {test_loss:.5f}")
 print(f"  Conformal quantile (90% coverage): ±{q_hat*100:.3f}% log-ret")
 sys.stdout.flush()
 
@@ -548,34 +566,40 @@ realized_ann_pct = realized_pre_vol * 100.0 * ANN_HOURLY
 print(f"  Scenario shock vol: {pre_vol*100:.3f}%/hr  <- {vol_shock_source}")
 print(f"  (trailing realized vol_24h = {realized_pre_vol*100:.3f}%/hr = {realized_ann_pct:.1f}% ann)")
 
-SCENARIOS = {
-    'BULL: ETF approval / macro catalyst': {
-        'prob': 0.35,
-        'shock': +0.04,
-        'color': '#00cc66',
-        'symbol': '▲'
-    },
-    'BASE: No major catalyst': {
-        'prob': 0.40,
-        'shock': 0.00,
-        'color': '#ffaa00',
-        'symbol': '●'
-    },
-    'BEAR: Regulatory headwinds': {
-        'prob': 0.25,
-        'shock': -0.06,
-        'color': '#ff4444',
-        'symbol': '▼'
+# Data-driven scenarios from the HMM (replaces the old hardcoded 35/40/25 probs
+# and +4/0/-6% shocks): next-step transition probabilities give the weights, and
+# each regime's empirical mean hourly return gives its drift. Vol = the validated
+# GARCH+DVOL forward shock for all scenarios.
+_color = {'BULL': '#00cc66', 'CHOP': '#ffaa00', 'BEAR': '#ff4444'}
+_symbol = {'BULL': '▲', 'CHOP': '●', 'BEAR': '▼'}
+_scen = []
+if hmm_ok:
+    _cur_state = int(state_series.reindex(df.index).ffill().iloc[-1])
+    _labels = [state_map[s] for s in range(3)]
+    _means = [float(state_returns[s]) for s in range(3)]
+    _vols = [float(df.loc[state_series == s, 'log_ret'].std()) for s in range(3)]
+    _scen = fp.regime_scenarios(hmm_model.transmat_, _cur_state, _labels,
+                                _means, _vols, hours_to_target)
+if not _scen:   # HMM unavailable -> single model-driven scenario
+    _scen = [{'label': 'MODEL', 'prob': 1.0, 'drift_per_hr': pre_mean_hourly, 'vol_per_hr': pre_vol}]
+
+SCENARIOS = {}
+for sc in _scen:
+    lbl = sc['label']
+    SCENARIOS[f"{lbl} regime ({sc['prob']*100:.0f}%)"] = {
+        'prob': sc['prob'],
+        'drift_per_hr': sc['drift_per_hr'],
+        'color': _color.get(lbl, '#8888ff'),
+        'symbol': _symbol.get(lbl, '●'),
     }
-}
 
 scenario_paths = {}
 scenario_stats = {}
 
 H = int(hours_to_target)
 for name, s in SCENARIOS.items():
-    # Vectorized GBM: hourly log-returns = drift + N(0, pre_vol), price = cumprod
-    drift = pre_mean_hourly + s['shock'] / hours_to_target
+    # Vectorized GBM: hourly log-returns = regime drift + N(0, pre_vol), cumprod.
+    drift = s['drift_per_hr']
     rets = drift + np.random.normal(0, pre_vol, size=(N_PATHS, H))
     paths = current_price * np.exp(np.cumsum(rets, axis=1))
 
@@ -598,6 +622,10 @@ comp_final = np.zeros(N_PATHS)
 for name, s in SCENARIOS.items():
     comp_final += s['prob'] * scenario_paths[name][:, -1]
 
+# Asymmetric (skew/fat-tail-aware) band straight from the composite distribution.
+# The backtest showed empirical/GARCH+DVOL bands are the best-calibrated (CRPS).
+comp_band = fp.empirical_quantile_band(comp_final, (0.05, 0.25, 0.5, 0.75, 0.95))
+
 print(f"\n  Scenario Analysis Results:")
 for name, stats in scenario_stats.items():
     print(f"\n  {name}")
@@ -609,6 +637,8 @@ for name, stats in scenario_stats.items():
 
 print(f"\n  ╭─ PROBABILITY-WEIGHTED COMPOSITE ─╮")
 print(f"  │ Mean: ${np.mean(comp_final):.2f}")
+print(f"  │ Asym 90% band: ${comp_band[0.05]:.2f} - ${comp_band[0.95]:.2f}")
+print(f"  │ Median ${comp_band[0.5]:.2f} (P25 ${comp_band[0.25]:.2f} / P75 ${comp_band[0.75]:.2f})")
 print(f"  │ P(+5%): {np.mean(comp_final > current_price*1.05)*100:.1f}%")
 print(f"  │ P(+10%): {np.mean(comp_final > current_price*1.10)*100:.1f}%")
 print(f"  │ P(-5%): {np.mean(comp_final < current_price*0.95)*100:.1f}%")
@@ -713,6 +743,8 @@ with open(report_file, 'w') as f:
 
     f.write("FORECAST (CNN-LSTM + MC Dropout):\n")
     f.write(f"  Mean price:         ${target_mean:.2f} ({target_pct_change:+.2f}%)\n")
+    f.write(f"  Drift:              raw {hourly_ret_raw:+.5f}/hr -> shrunk x{SHRINK_ALPHA} "
+            f"= {hourly_ret:+.5f}/hr (backtest: drift has no 24h edge)\n")
     f.write(f"  90% CI:             ${target_lower:.2f} - ${target_upper:.2f}\n")
     f.write(f"  MC range (2σ):      ${target_mc_lower:.2f} - ${target_mc_upper:.2f}\n\n")
 
@@ -740,6 +772,8 @@ with open(report_file, 'w') as f:
 
     f.write(f"\n\nPROBABILITY-WEIGHTED COMPOSITE:\n")
     f.write(f"  Mean: ${np.mean(comp_final):.2f}\n")
+    f.write(f"  Asymmetric 90% band: ${comp_band[0.05]:.2f} - ${comp_band[0.95]:.2f}\n")
+    f.write(f"  Median: ${comp_band[0.5]:.2f}  (P25 ${comp_band[0.25]:.2f} / P75 ${comp_band[0.75]:.2f})\n")
     f.write(f"  P(+5%): {np.mean(comp_final > current_price*1.05)*100:.1f}%\n")
     f.write(f"  P(+10%): {np.mean(comp_final > current_price*1.10)*100:.1f}%\n")
     f.write(f"  P(-5%): {np.mean(comp_final < current_price*0.95)*100:.1f}%\n")
