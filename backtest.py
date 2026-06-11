@@ -7,13 +7,22 @@ so nothing leaks across the line). Folds are stepped by the horizon, so the
 evaluated folds are non-overlapping.
 
 Metrics
-  - directional hit-rate          (vs a 50% coin-flip baseline)
-  - MAE / MAPE of the point price  (vs a random-walk persistence baseline)
-  - 90% interval coverage for three shock-vol variants that share the SAME
-    point forecast, so the comparison isolates band width:
-        realized   - trailing vol_24h            (the pre-integration band)
-        garch      - GARCH(1,1) forward forecast  (the model half)
-        garch+dvol - GARCH forward blended w/ Deribit DVOL (the full integration)
+  - directional hit-rate with a 90% binomial CI (vs a 50% coin-flip baseline)
+  - MAE / MAPE of the point price vs a random-walk persistence baseline, with
+    HLN-corrected Diebold-Mariano p-values on the per-fold loss differentials
+  - 90% coverage (with binomial CI) / CRPS / pinball / width for shock-vol
+    band variants that share the SAME point forecast and COMMON random
+    numbers, so comparisons isolate band construction:
+        real     - trailing vol_24h               (the pre-integration band)
+        garch    - GARCH(1,1) forward forecast    (the model half)
+        dvol     - GARCH blended w/ Deribit DVOL  (the validated integration)
+        har      - HAR-RV forward forecast        (realized-variance cascade)
+        hardvol  - HAR-RV blended w/ DVOL
+        gkdvol   - Garman-Klass-fed HAR blended w/ DVOL
+        comp     - regime composite: per-fold HMM scenarios, mixture-sampled
+                   finals, shared dvol sigma (mirrors production btc_forecast)
+        vinc     - vincentized regime composite (quantile averaging)
+  - an economic eval (vol-targeted long/short) swept over per-side fees
 
 Engines (pluggable via --engine)
   lite    - GradientBoosting, fast, many folds (default)
@@ -22,6 +31,9 @@ Engines (pluggable via --engine)
 
 import warnings
 warnings.filterwarnings('ignore')
+
+import logging
+logging.getLogger('hmmlearn').setLevel(logging.ERROR)   # EM non-monotonicity spam
 
 import argparse
 import os
@@ -187,6 +199,21 @@ def main():
     realized_h = df['vol'].values                 # trailing vol_24h (hourly std)
     base_mat = df[BASE_FEATURES].values
     fund_mat = df[FUND_FEATURES].values
+
+    # Garman-Klass per-bar variance for the GK-fed HAR variant. Bars failing
+    # the OHLC sanity check (yfinance glitches) come back NaN and are handled
+    # inside har_rv_forecast's day aggregation.
+    gkv = volatility.gk_variance(df['Open'].values, df['High'].values,
+                                 df['Low'].values, df['Close'].values)
+    n_gk_bad = int(np.isnan(gkv).sum())
+    if n_gk_bad:
+        print(f"  Garman-Klass: {n_gk_bad}/{n} bars failed OHLC sanity (NaN'd)")
+
+    try:                                          # regime-composite band needs hmmlearn
+        from hmmlearn.hmm import GaussianHMM
+    except Exception:
+        GaussianHMM = None
+        print("  hmmlearn unavailable -> regime composite falls back to dvol band at cur")
     # Target: mean hourly log-return over the next h hours.
     tgt = np.full(n, np.nan)
     tgt[:n - h] = (logc[h:] - logc[:n - h]) / h
@@ -202,6 +229,7 @@ def main():
     rng = np.random.default_rng(12345)
     rows = []
     dvol_hits = 0
+    hmm_ok_folds = 0
     # Strictly-prior accumulators for OUT-OF-SAMPLE post-processing (no leak).
     hist_rate, hist_realized, hist_err = [], [], []   # base rate vs realized tgt
     pt_err = {'base': [], 'fund': []}                 # point abs-errors -> ensemble weights
@@ -259,15 +287,87 @@ def main():
         else:
             sig_dvol = sig_garch
 
+        # HAR-RV forward vol, close-to-close and Garman-Klass-fed; a degenerate
+        # HAR fit falls back to the GARCH forecast (same contract as dvol).
+        hf = volatility.har_rv_forecast(log_ret[:t + 1], horizon=h, ann=ANN_HOURLY)
+        sig_har = (hf / ANN_HOURLY) if hf is not None else sig_garch
+        hfg = volatility.har_rv_forecast(log_ret[:t + 1], horizon=h, ann=ANN_HOURLY,
+                                         rv=gkv[:t + 1])
+        sig_gkhar = (hfg / ANN_HOURLY) if hfg is not None else sig_har
+        if dv is not None:
+            iv_hr = (dv / 100.0) / ANN_HOURLY
+            sig_hardvol = float(np.mean([sig_har, iv_hr]))
+            sig_gkdvol = float(np.mean([sig_gkhar, iv_hr]))
+        else:
+            sig_hardvol, sig_gkdvol = sig_har, sig_gkhar
+
+        # Common random numbers across band variants: the same standard-normal
+        # draws scaled by each variant's sigma, so per-fold CRPS differentials
+        # are PAIRED (sharper DM tests) and the RNG stream no longer depends on
+        # how many variants are scored.
         p_adj = rec['pt_adj']
-        for tag, sig in (('real', sig_real), ('garch', sig_garch), ('dvol', sig_dvol)):
+        z = rng.normal(0.0, 1.0, N_MC)
+        for tag, sig in (('real', sig_real), ('garch', sig_garch), ('dvol', sig_dvol),
+                         ('har', sig_har), ('hardvol', sig_hardvol),
+                         ('gkdvol', sig_gkdvol)):
             sd = max(float(sig), 1e-9) * np.sqrt(h)
-            draws = p_adj * np.exp(rng.normal(0.0, sd, N_MC))
+            draws = p_adj * np.exp(sd * z)
             band = fp.empirical_quantile_band(draws, (0.05, 0.25, 0.5, 0.75, 0.95))
             rec[f'cov_{tag}'] = mx.interval_coverage(band[0.05], band[0.95], actual)
             rec[f'crps_{tag}'] = mx.crps_ensemble(draws, actual)
             rec[f'pin_{tag}'] = mx.pinball_loss(band, actual)
             rec[f'wid_{tag}'] = (band[0.95] - band[0.05]) / p_adj
+
+        # Regime-composite band, mirroring production btc_forecast.py: HMM fit
+        # STRICTLY on data <= t (same spec: 3 spherical states on
+        # [log_ret, vol_24h]), next-step transition row -> scenario probs and
+        # per-regime drifts, shared GARCH+DVOL sigma, finals centered at cur.
+        # Scored two ways: 'comp' = mixture-sampled finals (the production
+        # construction after the averaging fix); 'vinc' = probability-weighted
+        # quantile averaging. A failed fit falls back to the single zero-drift
+        # dvol band at cur for that fold.
+        scen = []
+        if GaussianHMM is not None:
+            try:
+                Xh = np.column_stack([log_ret[:t + 1], realized_h[:t + 1]])
+                hmdl = GaussianHMM(n_components=3, covariance_type='spherical',
+                                   n_iter=100, random_state=42, min_covar=1e-4)
+                hmdl.fit(Xh)
+                states = hmdl.predict(Xh)
+                means = [float(log_ret[:t + 1][states == s].mean())
+                         if (states == s).any() else 0.0 for s in range(3)]
+                svols = [float(log_ret[:t + 1][states == s].std())
+                         if (states == s).any() else 0.0 for s in range(3)]
+                scen = fp.regime_scenarios(hmdl.transmat_, int(states[-1]), None,
+                                           means, svols, h)
+            except Exception:
+                scen = []
+        if scen:
+            hmm_ok_folds += 1
+        else:
+            scen = [{'prob': 1.0, 'drift_per_hr': 0.0}]
+        sd_dvol = max(float(sig_dvol), 1e-9) * np.sqrt(h)
+        sprobs = np.array([s['prob'] for s in scen], dtype=float)
+        sprobs = sprobs / sprobs.sum()
+        sfinals = [cur * np.exp(s['drift_per_hr'] * h + sd_dvol * z) for s in scen]
+        pick = rng.choice(len(scen), size=N_MC, p=sprobs)
+        draws_c = np.stack(sfinals)[pick, np.arange(N_MC)]
+        band_c = fp.empirical_quantile_band(draws_c, (0.05, 0.25, 0.5, 0.75, 0.95))
+        rec['cov_comp'] = mx.interval_coverage(band_c[0.05], band_c[0.95], actual)
+        rec['crps_comp'] = mx.crps_ensemble(draws_c, actual)
+        rec['pin_comp'] = mx.pinball_loss(band_c, actual)
+        rec['wid_comp'] = (band_c[0.95] - band_c[0.05]) / cur
+
+        band_v = fp.vincentize_scenarios(sfinals, sprobs,
+                                         (0.05, 0.25, 0.5, 0.75, 0.95))
+        # CRPS for the vincentized band from its quantile function: inverse-CDF
+        # samples on a uniform 1..99% grid fed to the ensemble estimator.
+        vq = fp.vincentize_scenarios(sfinals, sprobs,
+                                     tuple(np.linspace(0.01, 0.99, 99)))
+        rec['cov_vinc'] = mx.interval_coverage(band_v[0.05], band_v[0.95], actual)
+        rec['crps_vinc'] = mx.crps_ensemble(np.array(list(vq.values())), actual)
+        rec['pin_vinc'] = mx.pinball_loss(band_v, actual)
+        rec['wid_vinc'] = (band_v[0.95] - band_v[0.05]) / cur
         rows.append(rec)
 
         # advance strictly-prior accumulators AFTER use
@@ -283,18 +383,26 @@ def main():
     # ---- Metrics --------------------------------------------------------
     cur = R['cur'].values
     actual = R['actual'].values
-    rw_mae = float(np.abs(cur - actual).mean())
+    rw_abs = np.abs(cur - actual)     # per-fold persistence loss: MAE term AND
+    rw_mae = float(rw_abs.mean())     # point-mass CRPS of the random walk
     rw_mape = float(np.abs(cur / actual - 1).mean())
+    n_folds = len(R)
+    dm_h = max(1, int(np.ceil(h / step)))   # DM horizon in FOLD units (1 = non-overlapping)
+
+    def fmt_p(p):
+        return f"{p:5.3f}" if np.isfinite(p) else "   --"
 
     def pstats(tag):
         p = R[f'pt_{tag}'].values
-        hit = float((np.sign(p - cur) == np.sign(actual - cur)).mean())
-        return hit, float(np.abs(p - actual).mean()), float(np.abs(p / actual - 1).mean())
+        hits = int((np.sign(p - cur) == np.sign(actual - cur)).sum())
+        abs_err = np.abs(p - actual)
+        ci = mx.binomial_ci(hits, n_folds, level=0.90)
+        _, dm_p = mx.dm_test(abs_err, rw_abs, h=dm_h)
+        return (hits / n_folds, ci, float(abs_err.mean()),
+                float(np.abs(p / actual - 1).mean()), dm_p)
 
     drift_adj = np.log(R['pt_adj'].values / cur)          # predicted total log-ret over horizon
     realized_ret = np.log(actual / cur)
-    strat = mx.strategy_eval(drift_adj, realized_ret, R['vol_h'].values,
-                             fee_bps=5.0, ann_factor=ann_factor)
 
     models = [('base', 'base (TA only)    '), ('adj', 'shrunk+debiased   ')]
     if lite:
@@ -312,36 +420,66 @@ def main():
              f"({R['t'].iloc[0]:%Y-%m-%d} -> {R['t'].iloc[-1]:%Y-%m-%d}, step {step}h)")
     L.append(f"Funding:    {'on' if funding_ok else 'unavailable (zero-filled)'}")
     L.append("")
-    L.append("POINT FORECAST            hit%      MAE         MAPE")
+    L.append("POINT FORECAST            hit%   [90% CI]        MAE        MAPE   DMp(MAE~RW)")
     for tag, label in models:
-        hit, mae, mape = pstats(tag)
-        L.append(f"  {label}    {hit*100:5.1f}   ${mae:>9,.2f}   {mape*100:5.2f}%")
-    L.append(f"  persistence (RW)           --   ${rw_mae:>9,.2f}   {rw_mape*100:5.2f}%")
-    adj_mae = pstats('adj')[1]
+        hit, ci, mae, mape, dm_p = pstats(tag)
+        L.append(f"  {label}    {hit*100:5.1f}  [{ci[0]*100:4.1f},{ci[1]*100:4.1f}]"
+                 f"  ${mae:>9,.2f}   {mape*100:5.2f}%      {fmt_p(dm_p)}")
+    L.append(f"  persistence (RW)           --        --       ${rw_mae:>9,.2f}   {rw_mape*100:5.2f}%        --")
+    adj_mae = pstats('adj')[2]
     L.append(f"  -> shrunk+debiased beats persistence MAE: "
              f"{'YES' if adj_mae < rw_mae else 'NO'}  (final alpha~{R['alpha'].iloc[-1]:.2f})")
     L.append("")
-    L.append("DISTRIBUTION around shrunk point   coverage    CRPS      pinball   width")
+    L.append("DISTRIBUTION (90% band)    coverage  [90% CI]        CRPS     pinball    width  DMp~RW  DMp~dvol")
+    band_variants = [('real', 'realized vol_24h'), ('garch', 'GARCH forward   '),
+                     ('dvol', 'GARCH+DVOL      '), ('har', 'HAR-RV          '),
+                     ('hardvol', 'HAR+DVOL        '), ('gkdvol', 'GK-HAR+DVOL     '),
+                     ('comp', 'regime composite'), ('vinc', 'vincentized comp')]
+    crps_dvol_f = R['crps_dvol'].values
     best_crps, best_tag = None, None
-    for tag, label in (('real', 'realized vol_24h'), ('garch', 'GARCH forward  '),
-                       ('dvol', 'GARCH+DVOL     ')):
-        cov = float(R[f'cov_{tag}'].mean())
-        crps = float(R[f'crps_{tag}'].mean())
-        pin = float(R[f'pin_{tag}'].mean())
-        wid = float(R[f'wid_{tag}'].mean())
-        L.append(f"  {label}    {cov:6.3f}   ${crps:>8,.2f}   ${pin:>7,.2f}   +/-{wid/2*100:4.1f}%")
+    for tag, label in band_variants:
+        cov_hits = int(R[f'cov_{tag}'].sum())
+        cov = cov_hits / n_folds
+        cci = mx.binomial_ci(cov_hits, n_folds, level=0.90)
+        crps_f = R[f'crps_{tag}'].values
+        crps = float(np.nanmean(crps_f))
+        pin = float(np.nanmean(R[f'pin_{tag}'].values))
+        wid = float(np.nanmean(R[f'wid_{tag}'].values))
+        _, p_rw = mx.dm_test(crps_f, rw_abs, h=dm_h)
+        _, p_dv = (float('nan'), float('nan')) if tag == 'dvol' \
+            else mx.dm_test(crps_f, crps_dvol_f, h=dm_h)
+        L.append(f"  {label}   {cov:6.3f} [{cci[0]:.3f},{cci[1]:.3f}]  ${crps:>8,.2f}"
+                 f"  ${pin:>7,.2f}  +/-{wid/2*100:4.1f}%   {fmt_p(p_rw)}     {fmt_p(p_dv)}")
         if best_crps is None or crps < best_crps:
             best_crps, best_tag = crps, label.strip()
     L.append(f"  -> best CRPS (calibration+sharpness): {best_tag}")
+    wstd_dvol = float(np.nanstd(R['wid_dvol'].values))
+    wstd_gk = float(np.nanstd(R['wid_gkdvol'].values))
+    if wstd_dvol > 0:
+        L.append(f"  Band-width cross-fold std: dvol {wstd_dvol:.4f}  "
+                 f"gkdvol {wstd_gk:.4f}  ({(wstd_gk/wstd_dvol-1)*100:+.0f}%)")
     if dvol is not None:
         L.append(f"  (DVOL present for {dvol_hits}/{len(R)} folds)")
+    L.append(f"  (regime composite: HMM fit OK on {hmm_ok_folds}/{n_folds} folds"
+             + ("" if GaussianHMM is not None else "; hmmlearn unavailable") + ")")
     L.append("")
-    L.append("ECONOMIC  (vol-targeted long/short on shrunk drift, 5bps fee)")
-    L.append(f"  Sharpe (annualized):   {strat['sharpe']:+.2f}")
-    L.append(f"  Total return (log):    {strat['total_return']*100:+.1f}%")
-    L.append(f"  Max drawdown:          {strat['max_drawdown']*100:.1f}%")
-    L.append(f"  Trade hit-rate:        {strat['hit_rate']*100:.1f}%   "
-             f"avg|pos| {strat['avg_abs_position']:.2f}")
+    L.append("ECONOMIC  (vol-targeted long/short on shrunk drift; per-side fee sweep)")
+    L.append("  fee     sharpe    total    maxDD   trade-hit% [90% CI]      n")
+    for fee in (0.0, 5.0, 10.0, 20.0):
+        s = mx.strategy_eval(drift_adj, realized_ret, R['vol_h'].values,
+                             fee_bps=fee, ann_factor=ann_factor)
+        if s['n_traded'] and np.isfinite(s['hit_rate']):
+            tlo, thi = mx.binomial_ci(round(s['hit_rate'] * s['n_traded']),
+                                      s['n_traded'], level=0.90)
+            hit_txt = f"{s['hit_rate']*100:5.1f} [{tlo*100:4.1f},{thi*100:4.1f}]"
+        else:
+            hit_txt = "      --       "
+        L.append(f"  {fee:4.0f}bp  {s['sharpe']:+6.2f}  {s['total_return']*100:+6.1f}%"
+                 f"  {s['max_drawdown']*100:6.1f}%   {hit_txt}   {s['n_traded']}")
+    L.append("")
+    L.append(f"Selection context: {len(models) + 1} point variants and {len(band_variants)}"
+             f" band variants scored on this fold set - best-of-N picks inflate"
+             f" (Deflated-Sharpe caveat); confirm any winner with its DM p-value.")
     L.append("=" * 74)
     report = "\n".join(L)
     print("\n" + report)

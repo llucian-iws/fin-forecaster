@@ -155,6 +155,49 @@ def empirical_quantile_band(samples, quantiles=(0.05, 0.25, 0.5, 0.75, 0.95)):
     return out
 
 
+def vincentize_scenarios(scenario_samples, probs,
+                         quantiles=(0.05, 0.25, 0.5, 0.75, 0.95)):
+    """Probability-weighted quantile averaging (vincentization) of scenarios.
+
+    Combines per-scenario Monte-Carlo samples into one band by averaging each
+    quantile across scenarios, weighted by scenario probability:
+
+        Q_comb(tau) = sum_s p_s * Q_s(tau)
+
+    This is the sharper alternative to MIXTURE sampling (which preserves
+    multimodality and regime tails) — and both are correct combinations,
+    unlike a per-path convex combination of independent draws, which is a
+    convolution that shrinks variance (sum p_s^2 < 1) and erases regime skew.
+
+    `scenario_samples` is a sequence of 1-D sample arrays, one per scenario;
+    `probs` the matching weights (renormalized defensively; non-finite or
+    non-positive weights and empty/all-NaN sample sets are dropped as pairs).
+    Returns a dict {q: value} like empirical_quantile_band; every quantile
+    maps to NaN when nothing usable remains.
+    """
+    bands, weights = [], []
+    if scenario_samples is not None and probs is not None:
+        for samples, p in zip(scenario_samples, probs):
+            if p is None:
+                continue
+            p = float(p)
+            if not np.isfinite(p) or p <= 0.0:
+                continue
+            band = empirical_quantile_band(samples, quantiles)
+            if any(not np.isfinite(v) for v in band.values()):
+                continue
+            bands.append(band)
+            weights.append(p)
+
+    if not bands:
+        return {q: float('nan') for q in quantiles}
+
+    w = np.asarray(weights, dtype=float)
+    w = w / w.sum()
+    return {q: float(np.sum(w * np.array([b[q] for b in bands])))
+            for q in quantiles}
+
+
 def ensemble_combine(preds, oos_mae):
     """Inverse-error weighted average of model predictions.
 
@@ -257,7 +300,22 @@ if __name__ == '__main__':
     nan_band = empirical_quantile_band([])
     assert all(np.isnan(v) for v in nan_band.values())
 
-    # 6. ensemble_combine: lower MAE pulls the result toward that model.
+    # 6. vincentize_scenarios: quantile averaging of two shifted same-shape
+    #    distributions == the weighted shift; degenerate input -> NaN band.
+    s_lo = rng.normal(10.0, 1.0, size=50_000)
+    s_hi = rng.normal(20.0, 1.0, size=50_000)
+    vinc = vincentize_scenarios([s_lo, s_hi], [0.75, 0.25])
+    assert abs(vinc[0.5] - 12.5) < 0.05, vinc[0.5]          # 0.75*10 + 0.25*20
+    spread = vinc[0.95] - vinc[0.05]
+    one_spread = np.percentile(s_lo, 95) - np.percentile(s_lo, 5)
+    assert abs(spread - one_spread) < 0.1, (spread, one_spread)  # same shape kept
+    qs_v = sorted(vinc)
+    assert all(vinc[qs_v[i]] <= vinc[qs_v[i + 1]] for i in range(len(qs_v) - 1))
+    nan_v = vincentize_scenarios([[]], [1.0])
+    assert all(np.isnan(v) for v in nan_v.values())
+    assert all(np.isnan(v) for v in vincentize_scenarios([s_lo], [0.0]).values())
+
+    # 7. ensemble_combine: lower MAE pulls the result toward that model.
     preds = {'cnn': 1.0, 'lite': 3.0}
     mae = {'cnn': 1.0, 'lite': 3.0}  # weights 1.0 vs 0.333
     combo = ensemble_combine(preds, mae)
@@ -276,4 +334,5 @@ if __name__ == '__main__':
     print(f"  regime_scenarios[0]                    = {scen[0]}")
     print(f"  empirical_quantile_band                = "
           f"{{ {', '.join(f'{q}: {band[q]:+.4f}' for q in qs)} }}")
+    print(f"  vincentize_scenarios median            = {vinc[0.5]:.4f}  (expected ~12.5)")
     print(f"  ensemble_combine(1.0@mae1, 3.0@mae3)   = {combo:.4f}  (expected 1<c<2)")

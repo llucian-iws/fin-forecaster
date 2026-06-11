@@ -104,8 +104,13 @@ A leak-free walk-forward backtest is the project's success metric: train on an
 expanding window, forecast 24h ahead, compare to the realized outcome, roll
 forward (folds stepped by the horizon, so they're non-overlapping). It compares
 model variants (base TA / +funding / vol-standardized / ensemble / shrunk-to-RW)
-against a random-walk persistence baseline, scores three shock-vol variants with
-**coverage + CRPS + pinball**, and runs a vol-targeted economic eval.
+against a random-walk persistence baseline, scores eight band variants
+(realized / GARCH / GARCH+DVOL / HAR-RV / HAR+DVOL / GK-HAR+DVOL /
+regime-composite / vincentized-composite) with **coverage + CRPS + pinball**
+under common random numbers, and runs a vol-targeted economic eval swept over
+per-side fees. Every hit-rate and coverage prints with a 90% binomial CI, and
+loss differentials get HLN-corrected Diebold-Mariano p-values — differences
+inside the noise are labeled as such instead of being read as edges.
 
 ```bash
 docker run --rm -v "$(pwd)/results:/app/results" fin-forecaster:latest \
@@ -119,13 +124,21 @@ docker run --rm -v "$(pwd)/results:/app/results" fin-forecaster:latest \
 | `--step` | `= horizon` | Hours between folds (e.g. `168` for weekly) |
 | `--horizon` | `24` | Forecast horizon (hours) |
 
-**What it found** (lite, 150 daily folds):
+**What it found** (lite, 150 daily folds, 2026-06 re-run with the rigor layer):
 
-- The **point forecast has no 24h edge** — nothing beats the random-walk MAE and
-  optimal drift shrinkage → 0, so the deployed drift is shrunk toward the RW.
-- **Funding is the one real signal** — it lifts directional hit-rate 47% → 52%.
-- **GARCH+DVOL bands are best-calibrated** on coverage (0.90), CRPS, *and* pinball
-  — which is why they drive the scenario shock.
+- The **point forecast has no 24h edge** — nothing beats the random-walk MAE
+  (every variant's Diebold-Mariano p ≥ 0.10) and optimal drift shrinkage → 0,
+  so the deployed drift is shrunk toward the RW.
+- **Funding is the one directional signal** — hit-rate 47% → 53% — but its 90%
+  CI [46%, 59%] still contains the coin flip: a tilt, not a proven edge.
+- **GARCH+DVOL bands are the validated choice on COVERAGE** (0.907, CI
+  [0.86, 0.94] containing nominal 0.90; realized-vol bands under-cover at
+  0.86). The CRPS spread across vol sources (incl. HAR-RV and Garman-Klass
+  variants) is ~0.5% and statistically insignificant — no sharpness winner.
+- The **regime-composite band failed its first-ever validation** — coverage
+  0.96 at ±10.4% width, CRPS significantly worse than the plain shock (DM
+  p=0.002) — so the headline band is the single GARCH+DVOL shock and the
+  scenarios are illustrative only.
 
 The honest takeaway: the value is the **calibrated uncertainty band + a slight
 funding tilt**, not point prediction.
@@ -158,7 +171,9 @@ Conformal bands (90%) + MC-dropout bounds
         ▼
 10,000-path scenario Monte Carlo
    ├─ HMM data-driven regime scenarios (transition-matrix weights)
-   └─ shock vol = forward model: GARCH(1,1) ⊕ DVOL (falls back to realized vol_24h)
+   ├─ shock vol = forward model: GARCH(1,1) ⊕ DVOL (falls back to realized vol_24h)
+   └─ composite = MIXTURE sampling (each path drawn from one scenario by prob;
+      a per-path average would shrink variance by √(Σp²) and erase regime skew)
         ▼
 Asymmetric quantile band  +  Report + 4-panel chart
 ```
@@ -168,11 +183,11 @@ Asymmetric quantile band  +  Report + 4-panel chart
 | File | Purpose |
 |------|---------|
 | `btc_forecast.py` | Full stack: price (CNN-LSTM) + the `--volatility-only` wiring |
-| `volatility.py` | Asset-agnostic vol math: DVOL fetch, RV, EWMA, GARCH(1,1), report |
+| `volatility.py` | Asset-agnostic vol math: DVOL fetch, RV, EWMA, GARCH(1,1), HAR-RV, Garman-Klass/bipower measures, report |
 | `exogenous.py` | Keyless Binance funding/OI/basis fetchers + funding features |
-| `forecast_post.py` | Shrinkage, bias correction, HMM regime scenarios, quantile bands, ensemble |
-| `metrics.py` | CRPS, pinball, coverage, economic strategy eval |
-| `backtest.py` | Leak-free walk-forward backtest (`lite` + `cnnlstm` engines) |
+| `forecast_post.py` | Shrinkage, bias correction, HMM regime scenarios, quantile bands, vincentization, ensemble |
+| `metrics.py` | CRPS, pinball, coverage, binomial CI, Diebold-Mariano (HLN), economic strategy eval |
+| `backtest.py` | Leak-free walk-forward backtest (`lite` + `cnnlstm` engines) with the statistical-rigor report |
 | `btc_forecast_lite.py` | Gradient Boosting fallback (no TensorFlow) |
 | `Dockerfile` / `docker-compose.yml` | Python 3.11 + TensorFlow runtime |
 
