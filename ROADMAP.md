@@ -34,6 +34,15 @@ as `backtest_folds_lite_v3.csv`). Gate outcomes:
 - Funding tilt re-measured: 53% hit-rate, 90% CI [46, 59] - contains 50%.
 - Doc correction recorded (CLAUDE.md): data.binance.vision bulk archives
   carry deep OI/taker/premium history; the ~30d limit is REST-only.
+- **cnnlstm matched-fold confirmation (20 weekly folds, 2026-06-11,
+  `results/backtest_report_cnn_v3.txt`): all lite-run decisions hold.**
+  GARCH+DVOL coverage 0.900 exact on engine 2; no point edge (base hit 55%,
+  CI [37, 72], DM p=0.89 - the old "60% over 20 folds" number is confirmed
+  unstable); regime composite fails the same way (0.950 coverage at +/-10.1%
+  width, CRPS worse); GK width-stability replicates (-25%) but coverage/CRPS
+  still do not justify promotion. The cnn report's "best CRPS: vincentized
+  comp" is a 20-fold best-of-8 artifact (DM p=0.53; loses significantly on
+  the 150-fold lite sample, p=0.023).
 
 ---
 

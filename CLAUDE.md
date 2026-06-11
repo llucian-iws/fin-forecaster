@@ -158,17 +158,22 @@ default 0.3), `--volatility-only`/`VOLATILITY_ONLY`, `--asset`/`ASSET`
   scored before 2026-06). Mirrored production construction (per-fold HMM,
   regime drifts, shared GARCH+DVOL sigma, mixture-sampled): coverage 0.960 at
   ±10.4% width, CRPS $1,183 vs $1,001 for the plain single shock — significantly
-  worse, DM p=0.002; the vincentized variant also loses (p=0.023). Regime
-  drifts inject dispersion, not information. Production therefore reports the
-  **single GARCH+DVOL shock band as the headline** and keeps scenarios as
-  illustrative probabilities only. (The old composite was additionally buggy —
+  worse, DM p=0.002; the vincentized variant also loses (p=0.023). The cnnlstm
+  matched-fold run replicates the failure pattern (composite 0.950 coverage at
+  ±10.1% width, CRPS worse). Regime drifts inject dispersion, not information.
+  Production therefore reports the **single GARCH+DVOL shock band as the
+  headline** and keeps scenarios as illustrative probabilities only. (Caveat
+  for readers of the cnn report: "best CRPS: vincentized comp" there is a
+  20-fold best-of-8 artifact — its DM p=0.53 — the 150-fold lite run is the
+  decisive sample and it loses there at p=0.023.) (The old composite was additionally buggy —
   per-path convex averaging shrank variance by √(Σp²)≈0.95; now fixed via
   mixture sampling, which is correct but still not the headline.)
-- **HAR-RV / Garman-Klass add no significant band edge** (lite v3): HAR and
-  HAR+DVOL match GARCH+DVOL within noise (CRPS worse by 0.2-0.6%, DM p ≥ 0.16);
-  GK-HAR+DVOL passed only its width-STABILITY arm (cross-fold width std −17%,
-  CRPS within +0.2%, coverage 0.880). Not promoted to production
-  `fwd_components`; would need the cnnlstm matched-fold confirmation first.
+- **HAR-RV / Garman-Klass add no significant band edge** (lite v3 + cnnlstm
+  matched-fold confirmation): HAR and HAR+DVOL match GARCH+DVOL within noise
+  on both engines (CRPS worse, DM p ≥ 0.16); GK-HAR+DVOL's width-STABILITY arm
+  replicates on both (width std −17% lite / −25% cnn) but its coverage sits
+  below dvol's (0.880 lite / 0.850 cnn) with no CRPS win — NOT promoted to
+  production `fwd_components`. Decision closed 2026-06-11.
 - **Cross-engine comparisons need the SAME folds.** Lite defaults to daily
   steps (150 folds); cnnlstm was run with `--step 168` (20 weekly folds). Their
   persistence baselines differ because the samples differ — match `--step`/
