@@ -6,6 +6,15 @@ Repo: `/Users/llucian/PROJECTS/predictions` (main @ 6ace854). All gates run on t
 
 ## STATUS - implemented and gate-tested 2026-06-11
 
+**2026-06-11 (later): GK-HAR+DVOL PROMOTED to production** (exactly the
+validated construct: GK-HAR replacing the GARCH leg, GARCH fallback on a
+degenerate HAR fit). **Proven detractors removed**: the regime-composite
+aggregate is gone from the production report (headline = single validated
+shock; scenarios stay illustrative), and the composite/vincentized backtest
+variants are gated behind `--composite` (default off; dedicated RNG stream so
+the flag never perturbs the main variants). Default 300-fold runtime drops
+from ~45 to ~10 min.
+
 All three confirmed items were implemented and run through a fresh lite
 150-fold backtest (`results/backtest_report_lite_v3.txt`, folds CSV archived
 as `backtest_folds_lite_v3.csv`). Gate outcomes:

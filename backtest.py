@@ -154,6 +154,10 @@ def main():
     ap.add_argument('--min-train', type=int, default=2000, help='min rows before first fold')
     ap.add_argument('--window', type=int, default=168, help='cnnlstm sequence length')
     ap.add_argument('--epochs', type=int, default=3, help='cnnlstm epochs/fold')
+    ap.add_argument('--composite', action='store_true',
+                    help='also score the regime-composite + vincentized bands '
+                         '(adds a per-fold HMM fit, ~3x slower; construction '
+                         'refuted on lite150/cnn20/lite300 - kept for re-validation)')
     args = ap.parse_args()
     h = args.horizon
     step = args.step or h
@@ -209,11 +213,12 @@ def main():
     if n_gk_bad:
         print(f"  Garman-Klass: {n_gk_bad}/{n} bars failed OHLC sanity (NaN'd)")
 
-    try:                                          # regime-composite band needs hmmlearn
-        from hmmlearn.hmm import GaussianHMM
-    except Exception:
-        GaussianHMM = None
-        print("  hmmlearn unavailable -> regime composite falls back to dvol band at cur")
+    GaussianHMM = None
+    if args.composite:                            # regime-composite band needs hmmlearn
+        try:
+            from hmmlearn.hmm import GaussianHMM
+        except Exception:
+            print("  hmmlearn unavailable -> regime composite falls back to dvol band at cur")
     # Target: mean hourly log-return over the next h hours.
     tgt = np.full(n, np.nan)
     tgt[:n - h] = (logc[h:] - logc[:n - h]) / h
@@ -227,8 +232,9 @@ def main():
           f"({df.index[folds[0]].date()} -> {df.index[folds[-1]].date()}, step {step}h)...")
 
     rng = np.random.default_rng(12345)
-    rows = []
-    dvol_hits = 0
+    rng_comp = np.random.default_rng(67890)   # composite-only picks: separate
+    rows = []                                 # stream so --composite never
+    dvol_hits = 0                             # perturbs the main variants' draws
     hmm_ok_folds = 0
     # Strictly-prior accumulators for OUT-OF-SAMPLE post-processing (no leak).
     hist_rate, hist_realized, hist_err = [], [], []   # base rate vs realized tgt
@@ -318,56 +324,57 @@ def main():
             rec[f'pin_{tag}'] = mx.pinball_loss(band, actual)
             rec[f'wid_{tag}'] = (band[0.95] - band[0.05]) / p_adj
 
-        # Regime-composite band, mirroring production btc_forecast.py: HMM fit
-        # STRICTLY on data <= t (same spec: 3 spherical states on
-        # [log_ret, vol_24h]), next-step transition row -> scenario probs and
-        # per-regime drifts, shared GARCH+DVOL sigma, finals centered at cur.
-        # Scored two ways: 'comp' = mixture-sampled finals (the production
-        # construction after the averaging fix); 'vinc' = probability-weighted
-        # quantile averaging. A failed fit falls back to the single zero-drift
-        # dvol band at cur for that fold.
-        scen = []
-        if GaussianHMM is not None:
-            try:
-                Xh = np.column_stack([log_ret[:t + 1], realized_h[:t + 1]])
-                hmdl = GaussianHMM(n_components=3, covariance_type='spherical',
-                                   n_iter=100, random_state=42, min_covar=1e-4)
-                hmdl.fit(Xh)
-                states = hmdl.predict(Xh)
-                means = [float(log_ret[:t + 1][states == s].mean())
-                         if (states == s).any() else 0.0 for s in range(3)]
-                svols = [float(log_ret[:t + 1][states == s].std())
-                         if (states == s).any() else 0.0 for s in range(3)]
-                scen = fp.regime_scenarios(hmdl.transmat_, int(states[-1]), None,
-                                           means, svols, h)
-            except Exception:
-                scen = []
-        if scen:
-            hmm_ok_folds += 1
-        else:
-            scen = [{'prob': 1.0, 'drift_per_hr': 0.0}]
-        sd_dvol = max(float(sig_dvol), 1e-9) * np.sqrt(h)
-        sprobs = np.array([s['prob'] for s in scen], dtype=float)
-        sprobs = sprobs / sprobs.sum()
-        sfinals = [cur * np.exp(s['drift_per_hr'] * h + sd_dvol * z) for s in scen]
-        pick = rng.choice(len(scen), size=N_MC, p=sprobs)
-        draws_c = np.stack(sfinals)[pick, np.arange(N_MC)]
-        band_c = fp.empirical_quantile_band(draws_c, (0.05, 0.25, 0.5, 0.75, 0.95))
-        rec['cov_comp'] = mx.interval_coverage(band_c[0.05], band_c[0.95], actual)
-        rec['crps_comp'] = mx.crps_ensemble(draws_c, actual)
-        rec['pin_comp'] = mx.pinball_loss(band_c, actual)
-        rec['wid_comp'] = (band_c[0.95] - band_c[0.05]) / cur
+        # Regime-composite band (--composite only). The construction was
+        # REFUTED on every fold set (lite150 p=0.002, cnn20, lite300 p<0.001)
+        # and removed from production; this stays for re-validation. HMM fit
+        # STRICTLY on data <= t (3 spherical states on [log_ret, vol_24h]),
+        # next-step transition row -> scenario probs and per-regime drifts,
+        # shared GARCH+DVOL sigma, finals centered at cur. 'comp' = mixture-
+        # sampled finals; 'vinc' = probability-weighted quantile averaging.
+        # A failed fit falls back to the single zero-drift dvol band at cur.
+        if args.composite:
+            scen = []
+            if GaussianHMM is not None:
+                try:
+                    Xh = np.column_stack([log_ret[:t + 1], realized_h[:t + 1]])
+                    hmdl = GaussianHMM(n_components=3, covariance_type='spherical',
+                                       n_iter=100, random_state=42, min_covar=1e-4)
+                    hmdl.fit(Xh)
+                    states = hmdl.predict(Xh)
+                    means = [float(log_ret[:t + 1][states == s].mean())
+                             if (states == s).any() else 0.0 for s in range(3)]
+                    svols = [float(log_ret[:t + 1][states == s].std())
+                             if (states == s).any() else 0.0 for s in range(3)]
+                    scen = fp.regime_scenarios(hmdl.transmat_, int(states[-1]), None,
+                                               means, svols, h)
+                except Exception:
+                    scen = []
+            if scen:
+                hmm_ok_folds += 1
+            else:
+                scen = [{'prob': 1.0, 'drift_per_hr': 0.0}]
+            sd_dvol = max(float(sig_dvol), 1e-9) * np.sqrt(h)
+            sprobs = np.array([s['prob'] for s in scen], dtype=float)
+            sprobs = sprobs / sprobs.sum()
+            sfinals = [cur * np.exp(s['drift_per_hr'] * h + sd_dvol * z) for s in scen]
+            pick = rng_comp.choice(len(scen), size=N_MC, p=sprobs)
+            draws_c = np.stack(sfinals)[pick, np.arange(N_MC)]
+            band_c = fp.empirical_quantile_band(draws_c, (0.05, 0.25, 0.5, 0.75, 0.95))
+            rec['cov_comp'] = mx.interval_coverage(band_c[0.05], band_c[0.95], actual)
+            rec['crps_comp'] = mx.crps_ensemble(draws_c, actual)
+            rec['pin_comp'] = mx.pinball_loss(band_c, actual)
+            rec['wid_comp'] = (band_c[0.95] - band_c[0.05]) / cur
 
-        band_v = fp.vincentize_scenarios(sfinals, sprobs,
-                                         (0.05, 0.25, 0.5, 0.75, 0.95))
-        # CRPS for the vincentized band from its quantile function: inverse-CDF
-        # samples on a uniform 1..99% grid fed to the ensemble estimator.
-        vq = fp.vincentize_scenarios(sfinals, sprobs,
-                                     tuple(np.linspace(0.01, 0.99, 99)))
-        rec['cov_vinc'] = mx.interval_coverage(band_v[0.05], band_v[0.95], actual)
-        rec['crps_vinc'] = mx.crps_ensemble(np.array(list(vq.values())), actual)
-        rec['pin_vinc'] = mx.pinball_loss(band_v, actual)
-        rec['wid_vinc'] = (band_v[0.95] - band_v[0.05]) / cur
+            band_v = fp.vincentize_scenarios(sfinals, sprobs,
+                                             (0.05, 0.25, 0.5, 0.75, 0.95))
+            # CRPS for the vincentized band from its quantile function:
+            # inverse-CDF samples on a uniform 1..99% grid.
+            vq = fp.vincentize_scenarios(sfinals, sprobs,
+                                         tuple(np.linspace(0.01, 0.99, 99)))
+            rec['cov_vinc'] = mx.interval_coverage(band_v[0.05], band_v[0.95], actual)
+            rec['crps_vinc'] = mx.crps_ensemble(np.array(list(vq.values())), actual)
+            rec['pin_vinc'] = mx.pinball_loss(band_v, actual)
+            rec['wid_vinc'] = (band_v[0.95] - band_v[0.05]) / cur
         rows.append(rec)
 
         # advance strictly-prior accumulators AFTER use
@@ -433,8 +440,9 @@ def main():
     L.append("DISTRIBUTION (90% band)    coverage  [90% CI]        CRPS     pinball    width  DMp~RW  DMp~dvol")
     band_variants = [('real', 'realized vol_24h'), ('garch', 'GARCH forward   '),
                      ('dvol', 'GARCH+DVOL      '), ('har', 'HAR-RV          '),
-                     ('hardvol', 'HAR+DVOL        '), ('gkdvol', 'GK-HAR+DVOL     '),
-                     ('comp', 'regime composite'), ('vinc', 'vincentized comp')]
+                     ('hardvol', 'HAR+DVOL        '), ('gkdvol', 'GK-HAR+DVOL     ')]
+    if args.composite:
+        band_variants += [('comp', 'regime composite'), ('vinc', 'vincentized comp')]
     crps_dvol_f = R['crps_dvol'].values
     best_crps, best_tag = None, None
     for tag, label in band_variants:
@@ -460,8 +468,9 @@ def main():
                  f"gkdvol {wstd_gk:.4f}  ({(wstd_gk/wstd_dvol-1)*100:+.0f}%)")
     if dvol is not None:
         L.append(f"  (DVOL present for {dvol_hits}/{len(R)} folds)")
-    L.append(f"  (regime composite: HMM fit OK on {hmm_ok_folds}/{n_folds} folds"
-             + ("" if GaussianHMM is not None else "; hmmlearn unavailable") + ")")
+    if args.composite:
+        L.append(f"  (regime composite: HMM fit OK on {hmm_ok_folds}/{n_folds} folds"
+                 + ("" if GaussianHMM is not None else "; hmmlearn unavailable") + ")")
     L.append("")
     L.append("ECONOMIC  (vol-targeted long/short on shrunk drift; per-side fee sweep)")
     L.append("  fee     sharpe    total    maxDD   trade-hit% [90% CI]      n")

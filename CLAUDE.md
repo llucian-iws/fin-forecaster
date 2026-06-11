@@ -73,11 +73,12 @@ Quant forecasting stack for **price** and **volatility**, crypto + stocks. See
 - `btc_forecast.py` — full stack: CNN-LSTM + HMM + MC-dropout + conformal +
   10k-path scenario Monte Carlo, plus the `--volatility-only` branch. Includes
   the funding feature, drift **shrinkage** toward the random walk (`SHRINK_ALPHA`),
-  **HMM data-driven regime scenarios** (replaces the old hardcoded 35/40/25), an
-  **asymmetric quantile band**, and the **forward-vol shock** (GARCH(1,1) ⊕ DVOL).
-  The composite scenario band is **mixture-sampled** (each path drawn from one
-  scenario by probability) — the old per-path convex combination was a
-  convolution that shrank variance by √(Σp²) and erased regime skew.
+  **HMM data-driven regime scenarios** (illustrative per-regime views only), and
+  the **forward-vol shock**: **GK-HAR-RV ⊕ DVOL** (GARCH fallback when the HAR
+  fit is degenerate; realized vol_24h if the whole vol model fails). The
+  report's **headline 90% band is the validated single forward-vol shock at
+  the shrunk drift** — the regime-composite aggregate was removed after
+  failing validation on every backtest run.
 - `volatility.py` — asset-agnostic vol math (numpy/pandas/requests only, **no
   TensorFlow**): Deribit DVOL fetch, realized vol, EWMA, GARCH(1,1), **HAR-RV**
   (`har_rv_forecast`, same None-fallback contract as GARCH), **Garman-Klass** /
@@ -99,11 +100,11 @@ Quant forecasting stack for **price** and **volatility**, crypto + stocks. See
 - `backtest.py` — walk-forward backtest: compares model variants (base /
   +funding / vol-standardized / ensemble / shrunk) vs persistence on hit-rate &
   MAE, scores band variants (realized / GARCH / GARCH+DVOL / HAR / HAR+DVOL /
-  GK-HAR+DVOL / regime-composite / vincentized) with coverage + **CRPS +
-  pinball** under **common random numbers**, and prints the rigor layer:
-  binomial CIs, HLN-DM p-values vs persistence and vs the dvol incumbent, a
-  per-side **fee sweep** (0/5/10/20 bps), and a trial counter. Engines `lite`
-  (GB, fast) and `cnnlstm` (slow).
+  GK-HAR+DVOL; the refuted regime-composite + vincentized pair only behind
+  `--composite`) with coverage + **CRPS + pinball** under **common random
+  numbers**, and prints the rigor layer: binomial CIs, HLN-DM p-values vs
+  persistence and vs the dvol incumbent, a per-side **fee sweep** (0/5/10/20
+  bps), and a trial counter. Engines `lite` (GB, fast) and `cnnlstm` (slow).
 - `Dockerfile` / `docker-compose.yml` — Python 3.11 + TensorFlow runtime.
 
 ## How it runs
@@ -128,7 +129,8 @@ Quant forecasting stack for **price** and **volatility**, crypto + stocks. See
 seeds), `MODEL_EPOCHS` (default 5), `SHRINK_ALPHA` (drift shrinkage toward RW,
 default 0.3), `--volatility-only`/`VOLATILITY_ONLY`, `--asset`/`ASSET`
 (`crypto|stock`), `--ticker`/`TICKER`.
-`backtest.py`: `--engine lite|cnnlstm`, `--max-folds`, `--step`, `--horizon`.
+`backtest.py`: `--engine lite|cnnlstm`, `--max-folds`, `--step`, `--horizon`,
+`--composite` (re-score the refuted regime-composite bands; ~3x slower).
 
 ## Gotchas (learned the hard way)
 - **`--runs` must vary the seed per run** — a fixed seed makes averaging a no-op.
@@ -177,10 +179,11 @@ default 0.3), `--volatility-only`/`VOLATILITY_ONLY`, `--asset`/`ASSET`
   best CRPS of all 8 variants (not significant, p=0.127), width-stability
   replicated a third time (std −15%; −17% lite150, −25% cnn20). Plain HAR /
   HAR+DVOL stay within noise of GARCH+DVOL — no reason to prefer them.
-  **Promotion to production is an OPEN decision**: what the backtest validated
-  is mean(GK-HAR, DVOL) REPLACING the GARCH leg; the roadmap's original
-  "third averaged leg" construction was never scored — do not ship a
-  three-leg blend without scoring it first.
+  **PROMOTED to production 2026-06-11**: the shipped blend is exactly the
+  validated construct — mean(GK-HAR, DVOL), GK-HAR REPLACING the GARCH leg,
+  with the GARCH forecast as fallback when the HAR fit is degenerate. The
+  "third averaged leg" (GARCH+GK-HAR+DVOL) was never scored — don't ship it
+  without scoring it first.
 - **Cross-engine comparisons need the SAME folds.** Lite defaults to daily
   steps (150 folds); cnnlstm was run with `--step 168` (20 weekly folds). Their
   persistence baselines differ because the samples differ — match `--step`/

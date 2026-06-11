@@ -544,9 +544,22 @@ try:
     vol_info = volatility.forecast_volatility(
         df['log_ret'], horizon_steps=max(1, int(round(hours_to_target))),
         ann=ANN_HOURLY, rv_window=24, iv_df=dvol_df, iv_label='Deribit DVOL (BTC)')
-    # Blend GARCH forward realized with implied (DVOL) when available; both are
-    # annualized %, so divide by ANN_HOURLY to get an hourly log-return std.
-    fwd_components = [vol_info['forecast_rv']]
+    # Model leg: Garman-Klass-fed HAR-RV, the construct validated on the
+    # 300-fold lite backtest (ROADMAP 2.2: coverage 0.890 in-window and
+    # closest to nominal, band 10% narrower than the GARCH leg, width std
+    # -15%). Falls back to the GARCH forecast when the HAR fit is degenerate.
+    # Blended with implied (DVOL) when available; both legs are annualized %,
+    # so divide by ANN_HOURLY to get an hourly log-return std.
+    _gkv = volatility.gk_variance(df['Open'].values, df['High'].values,
+                                  df['Low'].values, df['Close'].values)
+    _hfg = volatility.har_rv_forecast(df['log_ret'].values,
+                                      horizon=max(1, int(round(hours_to_target))),
+                                      ann=ANN_HOURLY, rv=_gkv)
+    if _hfg is not None:
+        model_leg_pct, model_leg_name = _hfg * 100.0, 'GK-HAR'
+    else:
+        model_leg_pct, model_leg_name = vol_info['forecast_rv'], 'GARCH (HAR fallback)'
+    fwd_components = [model_leg_pct]
     if vol_info['iv_available']:
         fwd_components.append(vol_info['current_iv'])
     fwd_vol_ann_pct = float(np.mean(fwd_components))
@@ -554,7 +567,7 @@ try:
     if not np.isfinite(pre_vol) or pre_vol <= 0:
         raise ValueError('non-finite forward vol')
     vol_shock_source = (
-        f"forward model [GARCH {vol_info['forecast_rv']:.1f}%"
+        f"forward model [{model_leg_name} {model_leg_pct:.1f}%"
         + (f" + DVOL {vol_info['current_iv']:.1f}%" if vol_info['iv_available'] else "")
         + f" -> {fwd_vol_ann_pct:.1f}% ann -> {pre_vol*100:.3f}%/hr]")
 except Exception as exc:
@@ -618,28 +631,12 @@ for name, s in SCENARIOS.items():
         'prob': s['prob']
     }
 
-# Composite via MIXTURE sampling: each path's final price is drawn from ONE
-# scenario, chosen with the scenario probabilities. (The previous per-path
-# convex combination of independent scenario draws was a convolution — its
-# variance is sum(p_s^2) * sigma^2 < sigma^2 — which shrank the band and
-# erased the regime-tail asymmetry the composite exists to express.)
-_scen_names = list(SCENARIOS)
-_scen_probs = np.array([SCENARIOS[nm]['prob'] for nm in _scen_names], dtype=float)
-_scen_probs = _scen_probs / _scen_probs.sum()
-_pick = np.random.choice(len(_scen_names), size=N_PATHS, p=_scen_probs)
-_finals = np.stack([scenario_paths[nm][:, -1] for nm in _scen_names])
-comp_final = _finals[_pick, np.arange(N_PATHS)]
-
-# Band straight from the mixture composite (kept for the scenario diagnostics).
-comp_band = fp.empirical_quantile_band(comp_final, (0.05, 0.25, 0.5, 0.75, 0.95))
-
-# HEADLINE band: the walk-forward backtest's first validation of the regime
-# composite (150 lite folds, 2026-06) measured it significantly WORSE than the
-# plain GARCH+DVOL shock (CRPS $1,183 vs $1,001, HLN-DM p=0.002; coverage 0.960
-# at +/-10.4% width vs 0.907 at +/-4.1%) — the regime drifts inject dispersion,
-# not information. So the REPORTED 90% band is the validated single-shock
-# distribution at the shrunk model drift; the scenarios stay as illustrative
-# probabilities only.
+# HEADLINE band: the validated single forward-vol shock at the shrunk model
+# drift. The regime-composite band (probability-weighted aggregate of the
+# scenarios) was REMOVED after failing validation on every backtest run
+# (lite150 CRPS DM p=0.002, cnn20 replicated, lite300 p<0.001; over-covers at
+# 2x the width) — regime drifts inject dispersion, not information. The
+# scenarios below remain as illustrative per-regime views only.
 single_final = current_price * np.exp(
     pre_mean_hourly * H + np.random.normal(0.0, pre_vol * np.sqrt(H), N_PATHS))
 headline_band = fp.empirical_quantile_band(single_final,
@@ -654,15 +651,13 @@ for name, stats in scenario_stats.items():
     print(f"    P(+5%): {stats['prob_up_5pct']*100:.1f}% | P(+10%): {stats['prob_up_10pct']*100:.1f}%")
     print(f"    P(-5%): {stats['prob_down_5pct']*100:.1f}%")
 
-print(f"\n  ╭─ HEADLINE 90% BAND (validated single GARCH+DVOL shock) ─╮")
+print(f"\n  ╭─ HEADLINE 90% BAND (validated forward-vol shock) ─╮")
 print(f"  │ Asym 90% band: ${headline_band[0.05]:.2f} - ${headline_band[0.95]:.2f}")
 print(f"  │ Median ${headline_band[0.5]:.2f} (P25 ${headline_band[0.25]:.2f} / P75 ${headline_band[0.75]:.2f})")
 print(f"  │ P(+5%): {np.mean(single_final > current_price*1.05)*100:.1f}%   "
       f"P(+10%): {np.mean(single_final > current_price*1.10)*100:.1f}%   "
       f"P(-5%): {np.mean(single_final < current_price*0.95)*100:.1f}%")
-print(f"  │ Scenario mixture (illustrative; backtest: worse-calibrated):")
-print(f"  │   Mean ${np.mean(comp_final):.2f}   90%: ${comp_band[0.05]:.2f} - ${comp_band[0.95]:.2f}")
-print(f"  ╰──────────────────────────────────────────────────────────╯")
+print(f"  ╰────────────────────────────────────────────────────╯")
 
 # =====================================================================
 # Visualization
@@ -790,18 +785,13 @@ with open(report_file, 'w') as f:
         f.write(f"    P(+5%): {stats['prob_up_5pct']*100:.1f}% | P(+10%): {stats['prob_up_10pct']*100:.1f}%\n")
         f.write(f"    P(-5%): {stats['prob_down_5pct']*100:.1f}%\n")
 
-    f.write(f"\n\nHEADLINE 90% BAND (validated single GARCH+DVOL shock at the shrunk drift):\n")
+    f.write(f"\n\nHEADLINE 90% BAND (validated single forward-vol shock at the shrunk drift):\n")
+    f.write(f"  Shock source: {vol_shock_source}\n")
     f.write(f"  Asymmetric 90% band: ${headline_band[0.05]:.2f} - ${headline_band[0.95]:.2f}\n")
     f.write(f"  Median: ${headline_band[0.5]:.2f}  (P25 ${headline_band[0.25]:.2f} / P75 ${headline_band[0.75]:.2f})\n")
     f.write(f"  P(+5%): {np.mean(single_final > current_price*1.05)*100:.1f}%\n")
     f.write(f"  P(+10%): {np.mean(single_final > current_price*1.10)*100:.1f}%\n")
     f.write(f"  P(-5%): {np.mean(single_final < current_price*0.95)*100:.1f}%\n")
-
-    f.write(f"\nPROBABILITY-WEIGHTED COMPOSITE (scenario mixture - illustrative only;\n")
-    f.write(f"the walk-forward backtest measured it worse-calibrated than the single\n")
-    f.write(f"GARCH+DVOL shock, HLN-DM p=0.002):\n")
-    f.write(f"  Mean: ${np.mean(comp_final):.2f}\n")
-    f.write(f"  90% band: ${comp_band[0.05]:.2f} - ${comp_band[0.95]:.2f}\n")
 
 print(f"  Saved: {report_file}")
 

@@ -104,9 +104,10 @@ A leak-free walk-forward backtest is the project's success metric: train on an
 expanding window, forecast 24h ahead, compare to the realized outcome, roll
 forward (folds stepped by the horizon, so they're non-overlapping). It compares
 model variants (base TA / +funding / vol-standardized / ensemble / shrunk-to-RW)
-against a random-walk persistence baseline, scores eight band variants
-(realized / GARCH / GARCH+DVOL / HAR-RV / HAR+DVOL / GK-HAR+DVOL /
-regime-composite / vincentized-composite) with **coverage + CRPS + pinball**
+against a random-walk persistence baseline, scores six band variants
+(realized / GARCH / GARCH+DVOL / HAR-RV / HAR+DVOL / GK-HAR+DVOL — plus the
+refuted regime-composite pair behind `--composite`) with **coverage + CRPS +
+pinball**
 under common random numbers, and runs a vol-targeted economic eval swept over
 per-side fees. Every hit-rate and coverage prints with a 90% binomial CI, and
 loss differentials get HLN-corrected Diebold-Mariano p-values — differences
@@ -123,6 +124,7 @@ docker run --rm -v "$(pwd)/results:/app/results" fin-forecaster:latest \
 | `--max-folds` | `150` | Number of folds |
 | `--step` | `= horizon` | Hours between folds (e.g. `168` for weekly) |
 | `--horizon` | `24` | Forecast horizon (hours) |
+| `--composite` | off | Re-score the refuted regime-composite bands (per-fold HMM; ~3x slower) |
 
 **What it found** (lite, 300 daily folds 2025-08 → 2026-06, with cnnlstm
 matched-fold cross-checks):
@@ -138,8 +140,8 @@ matched-fold cross-checks):
   blend's ~0.9% CRPS edge over pure GARCH is significant (DM p=0.001) — the
   stack's one proven sharpness win.
 - **GK-fed HAR+DVOL passes the pre-registered width gate** — 10% narrower at
-  0.890 coverage (closest to nominal), best CRPS (n.s.) — promotion to the
-  production blend is pending a construction decision.
+  0.890 coverage (closest to nominal), best CRPS (n.s.) — and is now the
+  production blend (GK-HAR replacing the GARCH leg, GARCH as fallback).
 - The **regime-composite band fails validation on every run** (over-wide,
   CRPS significantly worse) — the headline band is the single GARCH+DVOL
   shock; scenarios are illustrative only.
@@ -174,12 +176,13 @@ Drift shrinkage toward the random walk  (SHRINK_ALPHA; backtest: no 24h edge)
 Conformal bands (90%) + MC-dropout bounds
         ▼
 10,000-path scenario Monte Carlo
-   ├─ HMM data-driven regime scenarios (transition-matrix weights)
-   ├─ shock vol = forward model: GARCH(1,1) ⊕ DVOL (falls back to realized vol_24h)
-   └─ composite = MIXTURE sampling (each path drawn from one scenario by prob;
-      a per-path average would shrink variance by √(Σp²) and erase regime skew)
+   ├─ HMM data-driven regime scenarios (transition-matrix weights; illustrative)
+   └─ shock vol = forward model: GK-HAR-RV ⊕ DVOL (GARCH fallback when the HAR
+      fit is degenerate; realized vol_24h if the whole vol model fails)
         ▼
-Asymmetric quantile band  +  Report + 4-panel chart
+Headline asymmetric band = validated single forward-vol shock at the shrunk
+drift (the regime-composite aggregate failed validation on every backtest run
+and was removed)  +  Report + 4-panel chart
 ```
 
 ## Key files
