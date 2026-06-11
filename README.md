@@ -124,24 +124,28 @@ docker run --rm -v "$(pwd)/results:/app/results" fin-forecaster:latest \
 | `--step` | `= horizon` | Hours between folds (e.g. `168` for weekly) |
 | `--horizon` | `24` | Forecast horizon (hours) |
 
-**What it found** (lite, 150 daily folds, 2026-06 re-run with the rigor layer):
+**What it found** (lite, 300 daily folds 2025-08 → 2026-06, with cnnlstm
+matched-fold cross-checks):
 
-- The **point forecast has no 24h edge** — nothing beats the random-walk MAE
-  (every variant's Diebold-Mariano p ≥ 0.10) and optimal drift shrinkage → 0,
-  so the deployed drift is shrunk toward the RW.
-- **Funding is the one directional signal** — hit-rate 47% → 53% — but its 90%
-  CI [46%, 59%] still contains the coin flip: a tilt, not a proven edge.
-- **GARCH+DVOL bands are the validated choice on COVERAGE** (0.907, CI
-  [0.86, 0.94] containing nominal 0.90; realized-vol bands under-cover at
-  0.86). The CRPS spread across vol sources (incl. HAR-RV and Garman-Klass
-  variants) is ~0.5% and statistically insignificant — no sharpness winner.
-- The **regime-composite band failed its first-ever validation** — coverage
-  0.96 at ±10.4% width, CRPS significantly worse than the plain shock (DM
-  p=0.002) — so the headline band is the single GARCH+DVOL shock and the
-  scenarios are illustrative only.
+- The **point forecast has no 24h edge** — at 300 folds the un-shrunk model
+  points are significantly WORSE than the random walk (DM p ≈ 0.03), so the
+  deployed drift is shrunk toward the RW (fitted shrinkage → 0) by design.
+- The **funding tilt is regime-dependent, not stable**: +5pp hit-rate on
+  Jan-Jun 2026, zero on the full Aug 2025-Jun 2026 window. A tilt at most,
+  never an edge.
+- **GARCH+DVOL bands are the validated choice**: coverage 0.917 [0.89, 0.94];
+  realized-vol bands provably under-cover (0.830, CI excludes 0.90). The DVOL
+  blend's ~0.9% CRPS edge over pure GARCH is significant (DM p=0.001) — the
+  stack's one proven sharpness win.
+- **GK-fed HAR+DVOL passes the pre-registered width gate** — 10% narrower at
+  0.890 coverage (closest to nominal), best CRPS (n.s.) — promotion to the
+  production blend is pending a construction decision.
+- The **regime-composite band fails validation on every run** (over-wide,
+  CRPS significantly worse) — the headline band is the single GARCH+DVOL
+  shock; scenarios are illustrative only.
 
-The honest takeaway: the value is the **calibrated uncertainty band + a slight
-funding tilt**, not point prediction.
+The honest takeaway: the value is the **calibrated uncertainty band**, not
+point prediction — and any directional tilt must be re-proven per regime.
 
 ## Output
 

@@ -34,6 +34,19 @@ as `backtest_folds_lite_v3.csv`). Gate outcomes:
 - Funding tilt re-measured: 53% hit-rate, 90% CI [46, 59] - contains 50%.
 - Doc correction recorded (CLAUDE.md): data.binance.vision bulk archives
   carry deep OI/taker/premium history; the ~30d limit is REST-only.
+- **300-fold power extension (lite v4, Aug 2025-Jun 2026,
+  `results/backtest_report_lite_v4_300.txt`) - the cross-cutting prep item
+  (3.2) executed; four previously-unresolvable questions settled:**
+  (1) un-shrunk model points are significantly WORSE than persistence
+  (DM p~0.03) - shrink-to-spot settled; (2) the funding lift VANISHED on the
+  longer window (base 49.0% vs +funding 48.7%) - regime-dependent, demoted
+  from the product story; (3) first significant positive: DVOL blending beats
+  pure GARCH on CRPS, ~0.9%, p=0.001 (was p=0.17 at 150 folds); realized-vol
+  under-coverage now proven (0.830, CI excludes 0.90); (4) GK-HAR+DVOL passes
+  the pre-registered 2.2 width arm (coverage 0.890 in-window, width -10%,
+  best CRPS n.s., width-std -15%) - PROMOTION OPEN: the validated construct
+  is mean(GK-HAR, DVOL) replacing the GARCH leg; the three-leg blend was
+  never scored. Composite failure triple-confirmed (CRPS p<0.001).
 - **cnnlstm matched-fold confirmation (20 weekly folds, 2026-06-11,
   `results/backtest_report_cnn_v3.txt`): all lite-run decisions hold.**
   GARCH+DVOL coverage 0.900 exact on engine 2; no point edge (base hit 55%,

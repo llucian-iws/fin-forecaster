@@ -147,20 +147,23 @@ default 0.3), `--volatility-only`/`VOLATILITY_ONLY`, `--asset`/`ASSET`
   different fold sets, so not comparable, and 20 folds is noisy: 95% CI
   [39%, 78%]). Don't sell the point forecast as predictive — its value is the
   calibrated distribution, not direction.
-- **The GARCH+DVOL band's validated claim is COVERAGE, not a CRPS win.** Lite
-  v3 (150 folds): coverage 0.907 [CI 0.860, 0.939] — nominal 0.90 inside the
-  CI; realized-vol bands under-cover (0.860 [0.807, 0.900]). But the CRPS
-  spread across all vol sources is ~0.5% and NOT significant (DM vs realized
-  p=0.56, vs GARCH p=0.17, under common random numbers) — don't claim a
-  sharpness edge. Re-run `backtest.py` before claiming any calibration change;
-  the report now prints the CIs and DM p-values to hold that line.
+- **The GARCH+DVOL band's validated claims (lite v4, 300 folds): coverage at
+  nominal plus the project's FIRST significant sharpness win.** Coverage 0.917
+  [CI 0.887, 0.939] (cnn matched folds: 0.900 exact). Raw realized-vol bands
+  now PROVABLY under-cover: 0.830 [0.791, 0.863] — the CI excludes 0.90 at
+  300 folds (150 folds couldn't resolve this). And blending DVOL into GARCH
+  improves CRPS ~0.9% with HLN-DM p=0.001 under common random numbers — at
+  150 folds this looked like noise (p=0.17); at 300 it's established. Claim
+  exactly that and no more; the report prints CIs and DM p-values to hold the
+  line, and comparisons are only valid within one run's fold set.
 - **The regime-composite band FAILED its first validation** (it had never been
   scored before 2026-06). Mirrored production construction (per-fold HMM,
   regime drifts, shared GARCH+DVOL sigma, mixture-sampled): coverage 0.960 at
   ±10.4% width, CRPS $1,183 vs $1,001 for the plain single shock — significantly
   worse, DM p=0.002; the vincentized variant also loses (p=0.023). The cnnlstm
-  matched-fold run replicates the failure pattern (composite 0.950 coverage at
-  ±10.1% width, CRPS worse). Regime drifts inject dispersion, not information.
+  matched-fold run replicates the failure (0.950 coverage at ±10.1% width,
+  CRPS worse), and the 300-fold lite v4 run triple-confirms it (0.947 at
+  ±8.4%, CRPS DM p<0.001; vinc p=0.022). Regime drifts inject dispersion, not information.
   Production therefore reports the **single GARCH+DVOL shock band as the
   headline** and keeps scenarios as illustrative probabilities only. (Caveat
   for readers of the cnn report: "best CRPS: vincentized comp" there is a
@@ -168,25 +171,32 @@ default 0.3), `--volatility-only`/`VOLATILITY_ONLY`, `--asset`/`ASSET`
   decisive sample and it loses there at p=0.023.) (The old composite was additionally buggy —
   per-path convex averaging shrank variance by √(Σp²)≈0.95; now fixed via
   mixture sampling, which is correct but still not the headline.)
-- **HAR-RV / Garman-Klass add no significant band edge** (lite v3 + cnnlstm
-  matched-fold confirmation): HAR and HAR+DVOL match GARCH+DVOL within noise
-  on both engines (CRPS worse, DM p ≥ 0.16); GK-HAR+DVOL's width-STABILITY arm
-  replicates on both (width std −17% lite / −25% cnn) but its coverage sits
-  below dvol's (0.880 lite / 0.850 cnn) with no CRPS win — NOT promoted to
-  production `fwd_components`. Decision closed 2026-06-11.
+- **GK-HAR+DVOL passes the pre-registered width gate at 300 folds** (lite v4):
+  coverage 0.890 [0.857, 0.916] inside the [0.88, 0.92] window AND nearest to
+  nominal of all variants, band 10% narrower than GARCH+DVOL (±3.6% vs ±4.0%),
+  best CRPS of all 8 variants (not significant, p=0.127), width-stability
+  replicated a third time (std −15%; −17% lite150, −25% cnn20). Plain HAR /
+  HAR+DVOL stay within noise of GARCH+DVOL — no reason to prefer them.
+  **Promotion to production is an OPEN decision**: what the backtest validated
+  is mean(GK-HAR, DVOL) REPLACING the GARCH leg; the roadmap's original
+  "third averaged leg" construction was never scored — do not ship a
+  three-leg blend without scoring it first.
 - **Cross-engine comparisons need the SAME folds.** Lite defaults to daily
   steps (150 folds); cnnlstm was run with `--step 168` (20 weekly folds). Their
   persistence baselines differ because the samples differ — match `--step`/
   `--max-folds` before comparing engines head-to-head.
-- **Funding is the one signal with directional content — but it is a TILT, not
-  a proven edge.** It lifts the 24h hit-rate 47%→53% (lite v3), yet the 90%
-  binomial CI [46%, 59%] still contains 50% and DM-MAE p=0.23 — 150 folds
-  cannot establish it. That's why the live drift is shrunk toward the random
-  walk (`SHRINK_ALPHA`, backtest α→0) and the point forecast lands ≈spot. The
-  product's value is the calibrated band + a slight funding tilt, NOT the
-  point. **Bias-correction was measured to HURT** at 24h (noise, not stable
-  bias) — it's in `forecast_post.py` but is deliberately NOT applied in
-  production.
+- **The funding tilt is NOT stable across windows.** On Jan-Jun 2026 (150
+  folds) funding lifted the 24h hit-rate 47%→53% (CI [46, 59]); on the longer
+  Aug 2025-Jun 2026 window (lite v4, 300 folds) the lift vanished — base 49.0%
+  vs +funding 48.7% [44.0, 53.4] — and the funding variant's MAE is
+  significantly WORSE than persistence (DM p=0.025). The economic eval agrees
+  (Sharpe ≈ 0 before fees, negative after, on the 300-fold window). Treat
+  funding as a regime-dependent tilt at most; never sell it as an edge. The
+  drift stays shrunk toward the random walk (`SHRINK_ALPHA`, backtest α→0) —
+  at 300 folds the un-shrunk model points are significantly WORSE than
+  persistence (DM p≈0.03-0.04), which settles the shrink-to-spot design.
+  **Bias-correction was measured to HURT** at 24h (noise, not stable bias) —
+  it's in `forecast_post.py` but is deliberately NOT applied in production.
 - **Only funding is WIRED as a backtestable exogenous feed.** The Binance REST
   endpoints give ~30d of OI and a live basis snapshot — but that limit is
   REST-only: **data.binance.vision bulk archives** (verified live) carry 5-min
