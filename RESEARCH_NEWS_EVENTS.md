@@ -78,16 +78,40 @@ more than its tradable size.
   no surviving claim establishes that it IS; GDELT/CryptoPanic timestamp
   depth remains an OPEN question.
 
+## Redundancy diagnostic (2026-06-12) - event widening is REDUNDANT at 24h
+
+Ran on the existing lite v4 300-fold CSV with the verified event calendar
+(6 FOMC decisions + 10 CPI releases inside the window, incl. the shutdown
+revisions: Sep-data CPI on 2025-10-24, no October-data release, Nov data on
+2025-12-18). All 16 events land in exactly one fold window each.
+
+- **The event-hour spike dilutes to nothing at the 24h scale**: mean |24h
+  return| is 1.78% on event folds vs 1.70% on non-event folds (ratio 1.05).
+  CPI folds are actually QUIETER than baseline at 24h (1.43%); FOMC folds run
+  hotter (2.37%, n=6).
+- **There is no coverage deficiency to fix**: dvol band covers 15/16 event
+  folds (0.938 [0.763, 0.986]); event-fold CRPS is BETTER than non-event
+  ($1,111 vs $1,127). The production gkdvol band: 0.875 [0.684, 0.958].
+- **The one event miss is unfixable by plausible widening**: 2026-03-18 FOMC,
+  5.27% move vs a +/-4.09% band - needs +29% width, while the measured
+  event-hour vol ratio (2.6x for 1 of 24 hours) justifies only ~+11%.
+- DVOL does not pre-widen on event days (ratio 0.96) - but nothing at this
+  horizon needs it to.
+
+**Decision: do NOT build event-day band widening for the 24h product.** The
+signal is real at the event hour and would matter at a 1-4h horizon; at 24h
+the band already absorbs it. n=16 is small - this is "no deficiency found",
+not "proven zero" - but a feature needs a deficiency to fix, and there is
+none.
+
 ## Open questions
 
-1. Does event-day band widening clear the 24h coverage/CRPS gate given only
-   ~25-30 event-day folds? (Extend to ~700d window to double event-day N.)
-2. Is GARCH+DVOL already capturing event effects endogenously (DVOL rises
-   into events, crushes after)? Cheap first test: split the EXISTING
-   backtest_folds CSV by event-day vs non-event-day folds and compare dvol
-   coverage/CRPS before writing any new code.
-3. At what lead time should widening activate (peer-reviewed evidence says
-   the response concentrates PRE-announcement)?
+1. ~~Does event-day widening clear the 24h gate?~~ ANSWERED above: no
+   deficiency exists to fix at 24h; dropped.
+2. ~~Is GARCH+DVOL already capturing event effects?~~ ANSWERED: at 24h there
+   is nearly nothing to capture; coverage on event folds is at/above nominal.
+3. The event calendar becomes the FIRST feature to add if the product ever
+   moves to a 1-4h horizon - that is where the 2-4x event-hour spike lives.
 4. GDELT / CryptoPanic timestamped deep history, ETF flow data, and on-chain
    free tiers were never resolved either way.
 

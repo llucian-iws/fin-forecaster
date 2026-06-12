@@ -200,6 +200,13 @@ default 0.3), `--volatility-only`/`VOLATILITY_ONLY`, `--asset`/`ASSET`
   persistence (DM p≈0.03-0.04), which settles the shrink-to-spot design.
   **Bias-correction was measured to HURT** at 24h (noise, not stable bias) —
   it's in `forecast_post.py` but is deliberately NOT applied in production.
+- **Event-day band widening (FOMC/CPI) measured REDUNDANT at 24h**
+  (2026-06-12, see `RESEARCH_NEWS_EVENTS.md`): the big event-HOUR vol spike
+  dilutes to a 1.05x |24h return| ratio; dvol band covers 15/16 event folds
+  (0.938) with BETTER event-fold CRPS than baseline; the one miss needed +29%
+  width while the event-hour spike justifies only ~+11%. Sentiment features
+  and Fear&Greed are refuted outright. Don't relitigate at 24h - the event
+  calendar is the first feature to add IF a 1-4h horizon product ever exists.
 - **Only funding is WIRED as a backtestable exogenous feed.** The Binance REST
   endpoints give ~30d of OI and a live basis snapshot — but that limit is
   REST-only: **data.binance.vision bulk archives** (verified live) carry 5-min
