@@ -108,9 +108,15 @@ Quant forecasting stack for **price** and **volatility**, crypto + stocks. See
 - `Dockerfile` / `docker-compose.yml` — Python 3.11 + TensorFlow runtime.
 
 ## How it runs
-- **The price path needs Docker** (TensorFlow 2.13+ / Python 3.11). Build once
-  with `docker build -t fin-forecaster:latest .`, run with
-  `-v "$(pwd)/results:/app/results"` so outputs reach the host.
+- **The price path needs Docker** (TensorFlow 2.13+ / Python 3.11). Build with
+  `docker build -t fin-forecaster:latest .`, run with
+  `-v "$(pwd)/results:/app/results"` so outputs reach the host. **Rebuild after
+  any change to the model files** (`btc_forecast.py` / `volatility.py` /
+  `forecast_post.py`) — the image bakes the code in, so a stale image silently
+  runs the OLD model. Verify with `docker inspect fin-forecaster:latest
+  --format '{{.Created}}'` against the last commit touching those files, and
+  confirm the report prints the `Shock source: ... GK-HAR ...` line (a run
+  missing it is on a pre-promotion image).
 - `OUTPUT_DIR = /app/results` is hard-coded in `btc_forecast.py` (Docker-only),
   but `backtest.py` honors the `OUTPUT_DIR` env var — the lite engine runs on
   the host with `OUTPUT_DIR=./results python3 backtest.py --engine lite` if
